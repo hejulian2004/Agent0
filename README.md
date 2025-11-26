@@ -18,13 +18,13 @@
 ## 🔥 News
 
 - **[2025/11/25]** Agent0-VL is released on [arXiv](https://arxiv.org/abs/2511.19900)!
-- **[2025/11]** Agent0 paper was released on [arXiv](https://arxiv.org/abs/2511.16043)!
+- **[2025/11/20]** Agent0 paper was released on [arXiv](https://arxiv.org/abs/2511.16043)!
 
 ---
 
 ## 📖 Overview
 
-The **Agent0 Series** represents a breakthrough in autonomous agent development, demonstrating that high-performing agents can evolve entirely from scratch without relying on any human-curated data or external supervision. This repository contains two complementary works that push the boundaries of self-evolving agents through tool-integrated reasoning:
+The **Agent0 Series** explores a new direction for autonomous agent development, showing that capable agents can improve and evolve without relying on human-curated datasets or handcrafted supervision. This repository brings together two complementary studies that advance self-improving agents through tool-integrated reasoning.
 
 ### 🤖 [Agent0](./Agent0): Self-Evolving Language Agents
 **Unleashing Self-Evolving Agents from Zero Data via Tool-Integrated Reasoning**

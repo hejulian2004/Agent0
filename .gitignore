@@ -1,0 +1,93 @@
+# ---------------------
+# macOS system files
+# ---------------------
+.DS_Store
+.DS_Store?
+.AppleDouble
+.LSOverride
+Icon?
+._*
+Thumbs.db
+
+# ---------------------
+# Python cache files
+# ---------------------
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# ---------------------
+# Virtual environment
+# ---------------------
+env/
+venv/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# ---------------------
+# Pipenv / Poetry / Conda
+# ---------------------
+Pipfile.lock
+poetry.lock
+.poetry/
+.conda/
+conda-meta/
+
+# ---------------------
+# Distribution / packaging
+# ---------------------
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ---------------------
+# Jupyter Notebook
+# ---------------------
+.ipynb_checkpoints
+profile_default/
+ipython_config.py
+
+# ---------------------
+# Logs & temp
+# ---------------------
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+
+# ---------------------
+# IDE / Editor settings
+# ---------------------
+# VSCode
+.vscode/
+# PyCharm
+.idea/
+
+# ---------------------
+# Pytest / coverage
+# ---------------------
+.cache
+coverage.xml
+htmlcov/
+.pytest_cache/
+.tox/
+.mypy_cache/
+.pyre/
