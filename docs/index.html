@@ -1,0 +1,835 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="description" content="Agent0 Series: Self-Evolving Agents from Zero Data via Tool-Integrated Reasoning">
+  <meta name="keywords" content="Agent0, Agent0-VL, Self-Evolution, Tool-Integrated Reasoning, Large Language Models, Vision-Language Models">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent0 Series: Self-Evolving Agents</title>
+
+  <!-- Global site tag (gtag.js) - Google Analytics -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-PYVRSFMDRL"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag() {
+      dataLayer.push(arguments);
+    }
+    gtag('js', new Date());
+    gtag('config', 'G-PYVRSFMDRL');
+  </script>
+
+  <link href="https://fonts.googleapis.com/css?family=Google+Sans|Noto+Sans|Castoro" rel="stylesheet">
+  <link rel="stylesheet" href="static/css/bulma.min.css">
+  <link rel="stylesheet" href="static/css/bulma-carousel.min.css">
+  <link rel="stylesheet" href="static/css/bulma-slider.min.css">
+  <link rel="stylesheet" href="static/css/fontawesome_6_7_2.all.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/jpswalsh/academicons@1/css/academicons.min.css">
+  <link rel="stylesheet" href="static/css/index.css">
+
+  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+  <script defer src="static/js/fontawesome_6_7_2.all.js"></script>
+  <script src="static/js/bulma-carousel.min.js"></script>
+  <script src="static/js/bulma-slider.min.js"></script>
+  <script src="static/js/index.js"></script>
+
+  <style>
+    .paper-card {
+      background: white;
+      border-radius: 12px;
+      padding: 2rem;
+      margin-bottom: 2rem;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+      transition: transform 0.3s ease, box-shadow 0.3s ease;
+    }
+
+    .paper-card:hover {
+      transform: translateY(-5px);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.15);
+    }
+
+    .paper-card h3 {
+      color: #2c3e50;
+      font-size: 1.5rem;
+      margin-bottom: 1rem;
+      font-weight: 600;
+    }
+
+    .paper-badge {
+      display: inline-block;
+      padding: 0.3rem 0.8rem;
+      border-radius: 20px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-right: 0.5rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .badge-agent0 {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+    }
+
+    .badge-agent0vl {
+      background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+      color: white;
+    }
+
+    .method-highlight {
+      background: #f8f9fa;
+      border-left: 4px solid #667eea;
+      padding: 1.5rem;
+      margin: 1.5rem 0;
+      border-radius: 8px;
+    }
+
+    .result-box {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 1.5rem;
+      border-radius: 12px;
+      margin: 1rem 0;
+      text-align: center;
+    }
+
+    .result-number {
+      font-size: 2.5rem;
+      font-weight: 700;
+      display: block;
+      margin-bottom: 0.5rem;
+    }
+
+    .figure-caption {
+      text-align: center;
+      color: #6c757d;
+      font-size: 0.95rem;
+      margin-top: 1rem;
+      line-height: 1.5;
+    }
+
+    .title.is-3 {
+      color: #2c3e50;
+      margin-bottom: 2rem;
+      position: relative;
+      padding-bottom: 1rem;
+    }
+
+    .title.is-3::after {
+      content: '';
+      position: absolute;
+      bottom: 0;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 60px;
+      height: 4px;
+      background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+      border-radius: 2px;
+    }
+
+    section.section {
+      padding: 3rem 1.5rem;
+    }
+
+    .comparison-table {
+      width: 100%;
+      margin: 2rem 0;
+      border-collapse: collapse;
+      background: white;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .comparison-table th {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 1rem;
+      text-align: center;
+      font-weight: 600;
+    }
+
+    .comparison-table td {
+      padding: 0.8rem;
+      text-align: center;
+      border-bottom: 1px solid #e9ecef;
+    }
+
+    .comparison-table tr:hover {
+      background-color: #f8f9fa;
+    }
+
+    .paper-links {
+      margin-top: 1rem;
+    }
+
+    .news-item {
+      padding: 0.5rem 0;
+      border-left: 3px solid #667eea;
+      padding-left: 1rem;
+      margin-bottom: 0.8rem;
+    }
+  </style>
+</head>
+<body>
+
+<nav class="navbar" role="navigation" aria-label="main navigation">
+  <div class="navbar-brand">
+    <a role="button" class="navbar-burger" aria-label="menu" aria-expanded="false">
+      <span aria-hidden="true"></span>
+      <span aria-hidden="true"></span>
+      <span aria-hidden="true"></span>
+    </a>
+  </div>
+</nav>
+
+<!-- Hero Section -->
+<section class="hero">
+  <div class="hero-body">
+    <div class="container is-max-desktop">
+      <div class="columns is-centered">
+        <div class="column has-text-centered">
+          <h1 class="title is-1 publication-title" style="margin-bottom: 1.5rem;">
+            Agent0 Series: Self-Evolving Agents from Zero Data
+          </h1>
+          <h2 class="subtitle is-4" style="color: #6c757d; margin-bottom: 2rem;">
+            Unleashing Autonomous Agent Evolution via Tool-Integrated Reasoning
+          </h2>
+
+          <div class="is-size-5 publication-authors" style="margin-bottom: 1.5rem;">
+            <span class="author-block">UNC-Chapel Hill</span>
+            <span class="author-block" style="margin: 0 0.5rem;">·</span>
+            <span class="author-block">Salesforce Research</span>
+            <span class="author-block" style="margin: 0 0.5rem;">·</span>
+            <span class="author-block">Stanford University</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- News Section -->
+<div class="container" style="margin-top: 2rem;">
+  <div class="columns is-centered">
+    <div class="column is-8">
+      <div class="content">
+        <p class="title is-5 has-text-left" style="font-weight: bold; color: #667eea;">🔥 News</p>
+        <div class="news-item">
+          <span>[2025/11/25] Agent0-VL paper was released on arXiv!</span>
+        </div>
+        <div class="news-item">
+          <span>[2025/11/20] Agent0 paper was released on arXiv!</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Papers Overview -->
+<section class="section" style="background: #f8f9fa;">
+  <div class="container is-max-desktop">
+    <h2 class="title is-3 has-text-centered">Our Papers</h2>
+
+    <!-- Unified Paper Card with Tabs -->
+    <div class="paper-card">
+      <!-- Tab Buttons -->
+      <div style="display: flex; justify-content: center; gap: 1rem; margin-bottom: 2rem;">
+        <button class="paper-tab-btn active" data-paper="agent0" onclick="switchPaper('agent0')" style="padding: 0.75rem 2rem; border: none; border-radius: 25px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: all 0.3s ease; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);">
+          <span style="margin-right: 0.5rem;">🤖</span> Agent0
+        </button>
+        <button class="paper-tab-btn" data-paper="agent0vl" onclick="switchPaper('agent0vl')" style="padding: 0.75rem 2rem; border: none; border-radius: 25px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: all 0.3s ease; background: #e9ecef; color: #495057;">
+          <span style="margin-right: 0.5rem;">👁️</span> Agent0-VL
+        </button>
+      </div>
+
+      <!-- Agent0 Content -->
+      <div id="agent0-content" class="paper-content" style="display: block;">
+        <div style="display: flex; align-items: center; margin-bottom: 1rem;">
+          <span class="paper-badge badge-agent0">Agent0</span>
+        </div>
+        <h3>Agent0: Unleashing Self-Evolving Agents from Zero Data via Tool-Integrated Reasoning</h3>
+
+        <div style="margin-bottom: 0.8rem; font-size: 0.9rem; color: #495057;">
+          <strong>Authors:</strong> Peng Xia<sup>1</sup>, Kaide Zeng<sup>1</sup>, Jiaqi Liu<sup>1</sup>, Can Qin<sup>2</sup>,
+          Fang Wu<sup>3</sup>, Yiyang Zhou<sup>1</sup>, Caiming Xiong<sup>2</sup>, Huaxiu Yao<sup>1</sup>
+          <br>
+          <span style="font-size: 0.85rem;"><sup>1</sup>UNC-Chapel Hill, <sup>2</sup>Salesforce Research, <sup>3</sup>Stanford University</span>
+        </div>
+
+        <p style="color: #6c757d; line-height: 1.7; margin-bottom: 1rem;">
+          A fully autonomous framework that evolves high-performing agents without external data through
+          multi-step co-evolution and seamless tool integration. Establishes a symbiotic competition
+          between curriculum agent and executor agent.
+        </p>
+
+        <div class="columns is-mobile" style="margin-top: 1rem; margin-bottom: 1.5rem;">
+          <div class="column">
+            <div class="result-box">
+              <span class="result-number">+18%</span>
+              <span style="font-size: 0.9rem;">Math Reasoning</span>
+            </div>
+          </div>
+          <div class="column">
+            <div class="result-box">
+              <span class="result-number">+24%</span>
+              <span style="font-size: 0.9rem;">General Reasoning</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Figure -->
+        <div style="margin: 2rem 0;">
+          <img src="images/agent0_overview.png" style="width: 100%; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);"/>
+          <p class="figure-caption" style="margin-top: 1rem;">
+            <strong>Figure:</strong> The Agent0 co-evolution framework showing the symbiotic competition between curriculum and executor agents.
+          </p>
+        </div>
+
+        <div class="paper-links">
+          <a href="https://arxiv.org/abs/2511.16043" class="button is-dark is-rounded">
+            <span class="icon"><i class="fa-solid fa-file-pdf" style="color: #ec4646;"></i></span>
+            <span>Paper</span>
+          </a>
+          <a href="https://github.com/aiming-lab/Agent0" class="button is-dark is-rounded">
+            <span class="icon"><i class="fab fa-github"></i></span>
+            <span>Code</span>
+          </a>
+        </div>
+      </div>
+
+      <!-- Agent0-VL Content -->
+      <div id="agent0vl-content" class="paper-content" style="display: none;">
+        <div style="display: flex; align-items: center; margin-bottom: 1rem;">
+          <span class="paper-badge badge-agent0vl">Agent0-VL</span>
+        </div>
+        <h3>Agent0-VL: Exploring Self-Evolving Agent for Tool-Integrated Vision-Language Reasoning</h3>
+
+        <div style="margin-bottom: 0.8rem; font-size: 0.9rem; color: #495057;">
+          <strong>Authors:</strong> Jiaqi Liu<sup>1</sup>, Kaiwen Xiong<sup>1</sup>, Peng Xia<sup>1</sup>, Yiyang Zhou<sup>1</sup>,
+          Haonian Ji<sup>1</sup>, Lu Feng<sup>1</sup>, Siwei Han<sup>1</sup>, Mingyu Ding<sup>1</sup>, Huaxiu Yao<sup>1</sup>
+          <br>
+          <span style="font-size: 0.85rem;"><sup>1</sup>UNC-Chapel Hill</span>
+        </div>
+
+        <p style="color: #6c757d; line-height: 1.7; margin-bottom: 1rem;">
+          A self-evolving vision-language agent that achieves continual improvement with tool-integrated reasoning.
+          Extends Agent0 to multimodal reasoning by incorporating tool usage into reasoning, self-evaluation, and self-repair.
+        </p>
+
+        <div class="columns is-mobile" style="margin-top: 1rem; margin-bottom: 1.5rem;">
+          <div class="column">
+            <div class="result-box" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
+              <span class="result-number">+12.5%</span>
+              <span style="font-size: 0.9rem;">Visual Reasoning</span>
+            </div>
+          </div>
+          <div class="column">
+            <div class="result-box" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
+              <span class="result-number">+7.3%</span>
+              <span style="font-size: 0.9rem;">Test-Time Scaling</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Figure -->
+        <div style="margin: 2rem 0;">
+          <img src="images/agent0vl_evo_loop.png" style="width: 100%; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);"/>
+          <p class="figure-caption" style="margin-top: 1rem;">
+            <strong>Figure:</strong> The Agent0-VL self-evolution framework showing the iterative evolution between Solver and Verifier roles.
+          </p>
+        </div>
+
+        <div class="paper-links">
+          <a href="https://arxiv.org/abs/2511.19900" class="button is-dark is-rounded">
+            <span class="icon"><i class="fa-solid fa-file-pdf" style="color: #ec4646;"></i></span>
+            <span>Paper</span>
+          </a>
+          <a href="https://github.com/aiming-lab/Agent0/tree/main/Agent0-VL" class="button is-dark is-rounded">
+            <span class="icon"><i class="fab fa-github"></i></span>
+            <span>Code</span>
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+function switchPaper(paper) {
+  // Hide all content
+  document.querySelectorAll('.paper-content').forEach(content => {
+    content.style.display = 'none';
+  });
+
+  // Show selected content
+  document.getElementById(paper + '-content').style.display = 'block';
+
+  // Update button styles
+  document.querySelectorAll('.paper-tab-btn').forEach(btn => {
+    if (btn.dataset.paper === paper) {
+      btn.classList.add('active');
+      if (paper === 'agent0') {
+        btn.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+        btn.style.color = 'white';
+        btn.style.boxShadow = '0 4px 12px rgba(102, 126, 234, 0.4)';
+      } else {
+        btn.style.background = 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)';
+        btn.style.color = 'white';
+        btn.style.boxShadow = '0 4px 12px rgba(240, 147, 251, 0.4)';
+      }
+    } else {
+      btn.classList.remove('active');
+      btn.style.background = '#e9ecef';
+      btn.style.color = '#495057';
+      btn.style.boxShadow = 'none';
+    }
+  });
+}
+</script>
+
+<!-- Agent0 Details -->
+<section class="section">
+  <div class="container is-max-desktop">
+    <h2 class="title is-3 has-text-centered">
+      <span class="paper-badge badge-agent0" style="font-size: 1.2rem; padding: 0.5rem 1.2rem;">Agent0</span>
+    </h2>
+
+    <div class="columns is-centered">
+      <div class="column is-10">
+        <h3 class="title is-4" style="color: #2c3e50; margin-top: 2rem;">Overview</h3>
+        <div class="content has-text-justified" style="font-size: 1.05rem; line-height: 1.8;">
+          <p>
+            Agent0 is a fully autonomous framework designed to guide the evolution of agents entirely from scratch,
+            completely eliminating the dependence on any external data or human annotations. It pioneeringly combines
+            tool integration with multi-round co-evolution.
+          </p>
+        </div>
+
+        <div style="text-align: center; margin: 2rem 0;">
+          <img src="images/agent0_method.png" style="max-width: 100%; border-radius: 12px; box-shadow: 0 8px 16px rgba(0,0,0,0.1);"/>
+          <p class="figure-caption">
+            <strong>Figure:</strong> The Agent0 co-evolution framework showing the symbiotic competition between curriculum and executor agents.
+          </p>
+        </div>
+
+        <div class="method-highlight">
+          <h4 class="title is-5" style="color: #495057; margin-bottom: 1rem;">
+            <i class="fas fa-lightbulb" style="color: #667eea; margin-right: 0.5rem;"></i>
+            Key Innovation: Symbiotic Co-Evolution
+          </h4>
+          <p style="line-height: 1.8;">
+            <strong>Curriculum Agent:</strong> Trained using RL to propose frontier tasks that precisely challenge
+            the executor's current capabilities, using the executor's uncertainty and tool-use frequency as reward signals.
+          </p>
+          <p style="line-height: 1.8; margin-top: 0.8rem;">
+            <strong>Executor Agent:</strong> Trained via RL to successfully solve these tasks, optimizing on a filtered
+            set of challenging problems and using pseudo-labels derived from its own majority voting.
+          </p>
+        </div>
+
+        <h3 class="title is-4" style="color: #2c3e50; margin-top: 2rem;">Results</h3>
+        <p style="margin-bottom: 1rem;">
+          Empirical results show that Agent0 achieves substantial model-agnostic capability gains on Qwen3-8B-Base:
+        </p>
+        <ul style="margin-left: 2rem; line-height: 2;">
+          <li><strong>18% improvement</strong> on mathematical reasoning benchmarks</li>
+          <li><strong>24% improvement</strong> on general reasoning benchmarks</li>
+          <li>Supports multi-turn interactions for context-rich, conversational tasks</li>
+        </ul>
+
+        <h4 class="title is-5" style="color: #495057; margin-top: 2rem; margin-bottom: 1rem;">Mathematical Reasoning Benchmarks</h4>
+        <div style="overflow-x: auto;">
+          <table class="comparison-table" style="font-size: 0.85rem;">
+            <thead>
+              <tr>
+                <th style="text-align: left;">Model</th>
+                <th>AVG</th>
+                <th>AMC</th>
+                <th>Minerva</th>
+                <th>MATH</th>
+                <th>GSM8K</th>
+                <th>Olympiad</th>
+                <th>AIME25</th>
+                <th>AIME24</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr style="background: #f8f9fa; font-style: italic;">
+                <td colspan="8" style="text-align: center; font-weight: 600;">Qwen3-8B-Base</td>
+              </tr>
+              <tr>
+                <td style="text-align: left;">Base Model</td>
+                <td>49.2</td>
+                <td>52.0</td>
+                <td>50.0</td>
+                <td>78.0</td>
+                <td>89.1</td>
+                <td>44.7</td>
+                <td>16.7</td>
+                <td>13.9</td>
+              </tr>
+              <tr>
+                <td style="text-align: left;">Base Model w/ tool</td>
+                <td>53.2</td>
+                <td>60.3</td>
+                <td>54.9</td>
+                <td>79.2</td>
+                <td>90.7</td>
+                <td>47.9</td>
+                <td>18.7</td>
+                <td>20.9</td>
+              </tr>
+              <tr>
+                <td style="text-align: left;">+ Absolute Zero</td>
+                <td>52.6</td>
+                <td>62.5</td>
+                <td>52.9</td>
+                <td>76.6</td>
+                <td>92.0</td>
+                <td>47.8</td>
+                <td>18.2</td>
+                <td>18.4</td>
+              </tr>
+              <tr>
+                <td style="text-align: left;">+ R-Zero</td>
+                <td>54.7</td>
+                <td>61.7</td>
+                <td>60.7</td>
+                <td>82.0</td>
+                <td>94.1</td>
+                <td>48.9</td>
+                <td>19.2</td>
+                <td>16.4</td>
+              </tr>
+              <tr>
+                <td style="text-align: left;">+ Socratic-Zero</td>
+                <td>56.1</td>
+                <td><strong>63.7</strong></td>
+                <td>52.4</td>
+                <td>81.2</td>
+                <td>87.3</td>
+                <td><strong>55.1</strong></td>
+                <td>24.5</td>
+                <td><strong>28.4</strong></td>
+              </tr>
+              <tr style="background: #e7f3ff;">
+                <td style="text-align: left; font-weight: 600;">+ Agent0 (Ours)</td>
+                <td><strong>58.2</strong></td>
+                <td>62.4</td>
+                <td><strong>61.3</strong></td>
+                <td><strong>82.4</strong></td>
+                <td><strong>94.5</strong></td>
+                <td>54.0</td>
+                <td><strong>24.8</strong></td>
+                <td>28.0</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="figure-caption">
+          <strong>Table:</strong> Comprehensive results on mathematical reasoning benchmarks. Agent0 achieves the highest average score.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Agent0-VL Details -->
+<section class="section" style="background: #f8f9fa;">
+  <div class="container is-max-desktop">
+    <h2 class="title is-3 has-text-centered">
+      <span class="paper-badge badge-agent0vl" style="font-size: 1.2rem; padding: 0.5rem 1.2rem;">Agent0-VL</span>
+    </h2>
+
+    <div class="columns is-centered">
+      <div class="column is-10">
+        <h3 class="title is-4" style="color: #2c3e50; margin-top: 2rem;">Overview</h3>
+        <div class="content has-text-justified" style="font-size: 1.05rem; line-height: 1.8;">
+          <p>
+            Agent0-VL extends the self-evolution paradigm to multimodal reasoning tasks by incorporating tool usage
+            not only into reasoning but also into self-evaluation and self-repair. It achieves continual self-improvement
+            without any human annotation or external reward models through a Self-Evolving Reasoning Cycle (SERC).
+          </p>
+        </div>
+
+        <div style="text-align: center; margin: 2rem 0;">
+          <img src="images/agent0vl_framework.png" style="max-width: 100%; border-radius: 12px; box-shadow: 0 8px 16px rgba(0,0,0,0.1);"/>
+          <p class="figure-caption">
+            <strong>Figure:</strong> The Agent0-VL framework showing the dual-role architecture with Solver and Verifier.
+          </p>
+        </div>
+
+        <div class="method-highlight">
+          <h4 class="title is-5" style="color: #495057; margin-bottom: 1rem;">
+            <i class="fas fa-brain" style="color: #f5576c; margin-right: 0.5rem;"></i>
+            Key Innovation: Dual-Role Self-Evolution
+          </h4>
+          <p style="line-height: 1.8;">
+            <strong>Solver:</strong> Performs multi-turn tool-integrated reasoning, dynamically invoking external tools
+            for grounded computation and visual perception.
+          </p>
+          <p style="line-height: 1.8; margin-top: 0.8rem;">
+            <strong>Verifier:</strong> Generates structured feedback and fine-grained self-rewards through tool-grounded critique,
+            enabling evidence-based self-evaluation and repair.
+          </p>
+        </div>
+
+        <h3 class="title is-4" style="color: #2c3e50; margin-top: 2rem;">Results</h3>
+        <p style="margin-bottom: 1rem;">
+          Agent0-VL demonstrates significant improvements on multimodal reasoning benchmarks:
+        </p>
+        <ul style="margin-left: 2rem; line-height: 2;">
+          <li><strong>12.5% average improvement</strong> over Qwen-VL base model on geometric reasoning and visual scientific analysis</li>
+          <li><strong>7.3% improvement</strong> in test-time scaling performance when used as a process reward model</li>
+          <li>Consistent performance gains across multiple iterations of self-evolution</li>
+          <li>State-of-the-art results among open-source vision-language models</li>
+        </ul>
+
+        <h4 class="title is-5" style="color: #495057; margin-top: 2rem; margin-bottom: 1rem;">Visual Reasoning Benchmarks</h4>
+        <div style="overflow-x: auto;">
+          <table class="comparison-table" style="font-size: 0.85rem;">
+            <thead>
+              <tr>
+                <th style="text-align: left;">Model</th>
+                <th>MathVerse</th>
+                <th>MathVision</th>
+                <th>MathVista</th>
+                <th>WeMath</th>
+                <th>HallBench</th>
+                <th>ChartQA</th>
+                <th>MMMU</th>
+                <th>Avg.</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr style="background: #f8f9fa; font-style: italic;">
+                <td colspan="9" style="text-align: center; font-weight: 600;">Open-Source General MLLMs</td>
+              </tr>
+              <tr>
+                <td style="text-align: left;">InternVL-2.5-8B</td>
+                <td>39.5</td>
+                <td>19.7</td>
+                <td>64.4</td>
+                <td>53.5</td>
+                <td>61.7</td>
+                <td>79.1</td>
+                <td>62.7</td>
+                <td>54.4</td>
+              </tr>
+              <tr>
+                <td style="text-align: left;">InternVL-3-8B</td>
+                <td>39.8</td>
+                <td>29.3</td>
+                <td>71.6</td>
+                <td>58.1</td>
+                <td>64.3</td>
+                <td>85.9</td>
+                <td>60.7</td>
+                <td>58.5</td>
+              </tr>
+              <tr>
+                <td style="text-align: left;">Qwen2.5-VL-7B</td>
+                <td>46.3</td>
+                <td>25.1</td>
+                <td>67.8</td>
+                <td>62.1</td>
+                <td>65.0</td>
+                <td>83.5</td>
+                <td>58.6</td>
+                <td>58.3</td>
+              </tr>
+              <tr>
+                <td style="text-align: left;">Qwen3-VL-8B</td>
+                <td>62.1</td>
+                <td>53.9</td>
+                <td>77.2</td>
+                <td>72.5</td>
+                <td>72.1</td>
+                <td>84.6</td>
+                <td>69.6</td>
+                <td>70.3</td>
+              </tr>
+              <tr style="background: #f8f9fa; font-style: italic;">
+                <td colspan="9" style="text-align: center; font-weight: 600;">Open-Source Reasoning MLLMs</td>
+              </tr>
+              <tr>
+                <td style="text-align: left;">Vision-R1-7B</td>
+                <td>51.9</td>
+                <td>30.7</td>
+                <td>73.5</td>
+                <td>73.9</td>
+                <td>68.8</td>
+                <td>79.8</td>
+                <td>50.5</td>
+                <td>61.3</td>
+              </tr>
+              <tr>
+                <td style="text-align: left;">OpenVLThinker-7B</td>
+                <td>45.7</td>
+                <td>26.3</td>
+                <td>71.2</td>
+                <td>66.7</td>
+                <td>70.2</td>
+                <td>78.4</td>
+                <td>-</td>
+                <td>-</td>
+              </tr>
+              <tr>
+                <td style="text-align: left;">MM-Eureka-Qwen-7B</td>
+                <td>50.5</td>
+                <td>27.9</td>
+                <td>73.6</td>
+                <td>67.4</td>
+                <td>66.9</td>
+                <td>82.1</td>
+                <td>52.7</td>
+                <td>60.2</td>
+              </tr>
+              <tr>
+                <td style="text-align: left;">ThinkLite-VL-7B</td>
+                <td>52.1</td>
+                <td>32.9</td>
+                <td>75.1</td>
+                <td>69.3</td>
+                <td>70.9</td>
+                <td>84.8</td>
+                <td>55.5</td>
+                <td>62.9</td>
+              </tr>
+              <tr style="background: #ffe6f0;">
+                <td style="text-align: left; font-weight: 600;">Agent0-VL-7B (Ours)</td>
+                <td>53.1</td>
+                <td>37.3</td>
+                <td>75.6</td>
+                <td>71.7</td>
+                <td>72.9</td>
+                <td>87.3</td>
+                <td>61.1</td>
+                <td>65.6</td>
+              </tr>
+              <tr style="background: #ffd4e8;">
+                <td style="text-align: left; font-weight: 600;">Agent0-VL-8B (Ours)</td>
+                <td><strong>65.5</strong></td>
+                <td><strong>56.2</strong></td>
+                <td><strong>83.7</strong></td>
+                <td><strong>79.6</strong></td>
+                <td><strong>74.3</strong></td>
+                <td><strong>89.7</strong></td>
+                <td><strong>73.4</strong></td>
+                <td><strong>74.6</strong></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="figure-caption">
+          <strong>Table:</strong> Comparison of model performance across visual reasoning benchmarks. Agent0-VL achieves state-of-the-art results among open-source models.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Comparison Section -->
+<section class="section">
+  <div class="container is-max-desktop">
+    <h2 class="title is-3 has-text-centered">Framework Comparison</h2>
+
+    <div class="columns is-centered">
+      <div class="column is-10">
+        <table class="comparison-table">
+          <thead>
+            <tr>
+              <th>Feature</th>
+              <th>Agent0</th>
+              <th>Agent0-VL</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="text-align: left; font-weight: 600;">Modality</td>
+              <td>Language</td>
+              <td>Vision + Language</td>
+            </tr>
+            <tr>
+              <td style="text-align: left; font-weight: 600;">Evolution Mechanism</td>
+              <td>Curriculum-Executor Co-Evolution</td>
+              <td>Solver-Verifier Self-Evolution</td>
+            </tr>
+            <tr>
+              <td style="text-align: left; font-weight: 600;">Tool Integration</td>
+              <td>✓ In reasoning</td>
+              <td>✓ In reasoning + evaluation + repair</td>
+            </tr>
+            <tr>
+              <td style="text-align: left; font-weight: 600;">External Data Required</td>
+              <td>Zero</td>
+              <td>Zero (for evolution)</td>
+            </tr>
+            <tr>
+              <td style="text-align: left; font-weight: 600;">Training Paradigm</td>
+              <td>Multi-round RL</td>
+              <td>Self-Evolving Reasoning Cycle (SERC)</td>
+            </tr>
+            <tr>
+              <td style="text-align: left; font-weight: 600;">Primary Task</td>
+              <td>Math & General Reasoning</td>
+              <td>Visual & Geometric Reasoning</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Citation Section -->
+<section class="section" style="background: #f8f9fa;">
+  <div class="container is-max-desktop">
+    <div class="columns is-centered has-text-centered">
+      <div class="column is-10">
+        <h2 class="title is-3">Citation</h2>
+
+        <div class="content">
+          <h4 class="title is-5 has-text-left">Agent0</h4>
+          <pre style="background-color: #f5f5f5; padding: 1.5rem; border-radius: 8px; overflow-x: auto; font-size: 0.9rem; text-align: left; border: 2px solid #e9ecef;">@article{xia2025agent0,
+  title={Agent0: Unleashing Self-Evolving Agents from Zero Data via Tool-Integrated Reasoning},
+  author={Xia, Peng and Zeng, Kaide and Liu, Jiaqi and Qin, Can and Wu, Fang and Zhou, Yiyang and Xiong, Caiming and Yao, Huaxiu},
+  journal={arXiv preprint arXiv:2511.16043},
+  year={2025}
+}</pre>
+
+          <h4 class="title is-5 has-text-left" style="margin-top: 2rem;">Agent0-VL</h4>
+          <pre style="background-color: #f5f5f5; padding: 1.5rem; border-radius: 8px; overflow-x: auto; font-size: 0.9rem; text-align: left; border: 2px solid #e9ecef;">@article{liu2025agent0vl,
+  title={Agent0-VL: Exploring Self-Evolving Agent for Tool-Integrated Vision-Language Reasoning},
+  author={Liu, Jiaqi and Xiong, Kaiwen and Xia, Peng and Zhou, Yiyang and Ji, Haonian and Feng, Lu and Han, Siwei and Ding, Mingyu and Yao, Huaxiu},
+  journal={arXiv preprint arXiv:2511.19900},
+  year={2025}
+}</pre>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Footer -->
+<footer class="footer" style="background: #2c3e50; color: #ecf0f1; padding: 3rem 1.5rem;">
+  <div class="container">
+    <div class="columns is-centered">
+      <div class="column is-8">
+        <div class="content has-text-centered">
+          <p style="color: #ecf0f1;">
+            This website is adapted from <a href="https://nerfies.github.io/" style="color: #3498db;">Nerfies</a> and licensed under a
+            <a rel="license" href="http://creativecommons.org/licenses/by-sa/4.0/" style="color: #3498db;">
+              Creative Commons Attribution-ShareAlike 4.0 International License
+            </a>.
+          </p>
+          <p style="color: #95a5a6; font-size: 0.9rem; margin-top: 1rem;">
+            © 2025 UNC-Chapel Hill. All rights reserved.
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
