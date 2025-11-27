@@ -13,7 +13,7 @@
 
 </div>
 <p align="center">
-  <img src="figs/logo.png" width="20%">
+  <img src="figs/logo.png" width="60%">
 </p>
 
 ## 🔥 News
