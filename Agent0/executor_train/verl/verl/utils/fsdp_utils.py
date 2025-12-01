@@ -501,7 +501,7 @@ def apply_fsdp2(model, fsdp_kwargs, config):
 
 
 def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinite=False, foreach=None):
-    """torch.nn.utils.clip_grad_norm_ cann't run on cpu parameter DTensor"""
+    """torch.nn.utils.clip_grad_norm_ can't run on cpu parameter DTensor"""
     from torch.nn.utils.clip_grad import _clip_grads_with_norm_, _get_total_norm
 
     if isinstance(parameters, torch.Tensor):

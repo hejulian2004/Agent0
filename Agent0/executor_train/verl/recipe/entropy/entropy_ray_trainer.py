@@ -180,7 +180,7 @@ class RayEntropyTrainer(RayPPOTrainer):
                             )
                             metrics.update(
                                 kl_metrics
-                            )  # TODO: This will be cleared if we use multiple genenration batches
+                            )  # TODO: This will be cleared if we use multiple generation batches
                         else:
                             new_batch.batch["token_level_rewards"] = new_batch.batch["token_level_scores"]
 
