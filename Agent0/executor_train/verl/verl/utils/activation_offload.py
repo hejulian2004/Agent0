@@ -96,14 +96,14 @@ class OffloadHandler:
     def tensor_push(self, tensor: torch.Tensor, **kwargs) -> Any:
         """Tensor push."""
         raise NotImplementedError(
-            "`tensor_push is not implented in OffloadHandler class. Inherit this class and implement your "
+            "`tensor_push is not implemented in OffloadHandler class. Inherit this class and implement your "
             "custom tensor_push."
         )
 
     def tensor_pop(self, tensor_tag: Any, **kwargs):
         """Tensor pop."""
         raise NotImplementedError(
-            "`tensor_pop is not implented in OffloadHandler class. Inherit this class and implement your "
+            "`tensor_pop is not implemented in OffloadHandler class. Inherit this class and implement your "
             "custom tensor_pop."
         )
 
@@ -307,7 +307,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                     key = _get_unique_tensor_key(state)
                     if key not in offload_mapping:
                         offload_mapping[key] = state
-                    # if offload, return the reference to cpu copy
+                    # if offloaded, return the reference to cpu copy
                     self.tensor_tag_to_state[tensor_tag] = (key, state.shape)
             for key, tensor in offload_mapping.items():
                 state = SynchronizedGroupOffloadHandler.offload(tensor)

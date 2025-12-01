@@ -72,7 +72,7 @@ ADV_ESTIMATOR_REGISTRY = {}
 
 
 def register_adv_est(name_or_enum):
-    """Decorator to register a advantage estimator function with a given name.
+    """Decorator to register an advantage estimator function with a given name.
 
     Args:
         name_or_enum: `(str)` or `(AdvantageEstimator)`
