@@ -372,13 +372,13 @@ def format_intervals(prediction):
         if match:
             inner_content = match.group(1)
 
-            if key == "Interval(":  # Intarval(a, b) == [a, b]
+            if key == "Interval(":  # Interval(a, b) == [a, b]
                 return f"[{inner_content}]"
-            elif key == "Interval.Ropen(":  # Intarval.Ropen(a, b) == [a, b)
+            elif key == "Interval.Ropen(":  # Interval.Ropen(a, b) == [a, b)
                 return f"[{inner_content})"
-            elif key == "Interval.Lopen(":  # Intarval.Lopen(a, b) == (a, b]
+            elif key == "Interval.Lopen(":  # Interval.Lopen(a, b) == (a, b]
                 return f"({inner_content}]"
-            elif key == "Interval.open(":  # Intarval.open(a, b) == (a, b)
+            elif key == "Interval.open(":  # Interval.open(a, b) == (a, b)
                 return f"({inner_content})"
 
     return prediction

@@ -12,7 +12,7 @@ Assuming GSM8k/math dataset is preprocessed via:
 python3 examples/data_preprocess/*.py
 ```
 
-Refer to the table below to reproduce RL training from different pre-trained checkpoints. Below is the performance on the GSM8k dataset if not specified otherwise. More comprehensive benchmark results areavailable in the recipe folder.
+Refer to the table below to reproduce RL training from different pre-trained checkpoints. Below is the performance on the GSM8k dataset if not specified otherwise. More comprehensive benchmark results are available in the recipe folder.
 
 
 | Hardware    | Model                            | Method            | Test score   | Details |
