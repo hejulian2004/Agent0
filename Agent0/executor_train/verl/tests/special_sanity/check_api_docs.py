@@ -52,7 +52,7 @@ _ALLOW_LIST = [
 
 
 def iter_submodules(root: ModuleType) -> Iterable[ModuleType]:
-    """Yield *root* and every sub-module inside it."""
+    """Yield *root* and every submodule inside it."""
     yield root
     if getattr(root, "__path__", None):  # only packages have __path__
         for mod_info in pkgutil.walk_packages(root.__path__, prefix=f"{root.__name__}."):
@@ -83,7 +83,7 @@ def names_missing_doc(mod: ModuleType) -> list[str]:
 
 
 def check_module(qualname: str) -> list[str]:
-    """Import *qualname* and check it (and sub-modules)."""
+    """Import *qualname* and check it (and submodules)."""
     try:
         module = importlib.import_module(qualname)
     except ModuleNotFoundError as exc:

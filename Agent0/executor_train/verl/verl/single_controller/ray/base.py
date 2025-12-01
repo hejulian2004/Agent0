@@ -874,7 +874,7 @@ def create_colocated_worker_raw_cls(class_dict: dict[str, RayClassWithInitArgs])
 
 def create_colocated_worker_cls_fused(class_dict: dict[str, RayClassWithInitArgs]):
     """
-    This function returns a RayClassWithInitArgs instance of FusedWorker, which is an replacement
+    This function returns a RayClassWithInitArgs instance of FusedWorker, which is a replacement
     of `create_colocated_worker_cls`. WorkerGroup constructed using this class will be a colocated
     WorkerGroup, which will be referenced as `ColocateWorkerGroup` below.
 

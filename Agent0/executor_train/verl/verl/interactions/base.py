@@ -57,7 +57,7 @@ class BaseInteraction:
         """
         Calculates a score for the interaction,
         potentially considering aspects like partial exposure & in-context task switching.
-        should be invoke at turn-level
+        should be invoked at turn-level
         """
         # ...implement the logic to calculate turn-level score...
         score = 0.0

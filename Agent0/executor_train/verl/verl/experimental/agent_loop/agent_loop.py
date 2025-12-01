@@ -121,7 +121,7 @@ class AgentLoopOutput(BaseModel):
 
 
 class AgentLoopBase(ABC):
-    """An agent loop takes a input message, chat with OpenAI compatible LLM server and interact with various
+    """An agent loop takes an input message, chat with OpenAI compatible LLM server and interact with various
     environments."""
 
     _class_initialized = False
@@ -351,7 +351,7 @@ class AgentLoopWorker:
 
 
 async def get_trajectory_info(step, index):
-    """Get the trajectory info (step, sample_index, rollout_n) asynchrously"""
+    """Get the trajectory info (step, sample_index, rollout_n) asynchronously"""
     trajectory_info = []
     rollout_n = 0
     for i in range(len(index)):

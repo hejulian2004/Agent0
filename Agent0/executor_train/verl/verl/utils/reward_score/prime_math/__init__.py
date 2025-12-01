@@ -181,7 +181,7 @@ def _normalize(expr: str) -> str:
 
     expr = _inject_implicit_mixed_number(expr)
 
-    # don't be case sensitive for text answers
+    # don't be case-sensitive for text answers
     expr = expr.lower()
 
     if _str_is_int(expr):
