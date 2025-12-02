@@ -147,7 +147,7 @@ def main_task(config):
         Role.Critic: ray.remote(CriticWorker),
     }
 
-    # NOTE: initialze two resource pool
+    # NOTE: initialize two resource pool
     actor_rollout_ref_pool_id = "actor_rollout_ref_pool"
     critic_pool_id = "critic_pool"
     if config.trainer.nnodes // 2 == 0 and config.trainer.n_gpus_per_node // 2 > 0:

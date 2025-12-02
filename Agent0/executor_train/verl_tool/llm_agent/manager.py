@@ -152,7 +152,7 @@ class AgentActorManager:
 
         # we manually repeat the input by n times if needed since every trajectory is independent
         do_sample = inputs.meta_info.get("do_sample", True)
-        assert 'traj_ids' in inputs.non_tensor_batch, "traj_ids should be claimed univerally in the ray trainer"
+        assert 'traj_ids' in inputs.non_tensor_batch, "traj_ids should be claimed universally in the ray trainer"
         ori_len = len(inputs.batch['input_ids'])
         if not do_sample:
             n = 1
@@ -394,7 +394,7 @@ class AgentActorManager:
                         else:
                             raw_prompt = ""
 
-                        # udpate rollout messages with next_obs
+                        # update rollout messages with next_obs
                         if "rollout_messages" in rollings.non_tensor_batch and raw_prompt:
                             content_list = []
                             segment_idx = defaultdict(int)
@@ -1210,7 +1210,7 @@ class AgentActorManager:
         Call tool server for queries.
         Args:
             batch: batch of data
-            resposnes: responses from the model
+            responses: responses from the model
             pad_token: pad token
             active_mask: active mask
         Returns: (All of length of active_mask, which is the original batch size)
@@ -1237,7 +1237,7 @@ class AgentActorManager:
         active_valid_actions = [int(x) for x in response['valids']]
 
         logger.debug(f"Received observations from tool server. Samples: {len(active_observations)}")
-        logger.info(f" - Number of valid actions (exclusing finish action): {len([x for x in active_valid_actions if x])} / {len(active_valid_actions)}")
+        logger.info(f" - Number of valid actions (excluding finish action): {len([x for x in active_valid_actions if x])} / {len(active_valid_actions)}")
         logger.info(f" - Number of dones: {len([x for x in active_dones if x])} / {len(active_dones)}")
         logger.debug("Example observations:")
         non_empty_observations = [obs for obs in active_observations if obs]

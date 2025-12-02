@@ -220,7 +220,7 @@ def _fused_GPTModel_forward(
         else:
             # Flash decoding uses precomputed cos and sin for RoPE
             raise NotImplementedError(
-                "Flash decoding uses precomputed cos and sin for RoPE, not implmented in MultimodalRotaryEmbedding yet."
+                "Flash decoding uses precomputed cos and sin for RoPE, not implemented in MultimodalRotaryEmbedding yet."
             )
 
     if (

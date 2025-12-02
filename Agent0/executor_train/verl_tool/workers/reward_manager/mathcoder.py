@@ -168,7 +168,7 @@ class MathCoderRewardManager:
                 json.dump(to_save_records, f, indent=4)
             
         if self.num_examine == 1:
-            # for validation, empty the reward_extra_info, becuase there are None items and cannot be mean
+            # for validation, empty the reward_extra_info, because there are None items and cannot be mean
             reward_extra_info = defaultdict(list)
         if return_dict:
             return {
