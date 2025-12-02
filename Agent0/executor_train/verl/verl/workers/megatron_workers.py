@@ -279,7 +279,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             from verl.workers.rollout.vllm_rollout import vLLMRollout
             from verl.workers.sharding_manager.megatron_vllm import MegatronVLLMShardingManager
 
-            # NOTE(sgm): If the QKV and gate_up projection layer are concate together in actor,
+            # NOTE(sgm): If the QKV and gate_up projection layer are concatenated together in actor,
             # we will reorganize their weight format when resharding from actor to rollout.
 
             infer_tp = self.config.rollout.tensor_model_parallel_size

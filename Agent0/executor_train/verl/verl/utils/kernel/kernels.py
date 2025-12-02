@@ -284,7 +284,7 @@ def efficient_entropy_triton_kernel_epilogue(
     BLOCK_SIZE_N: tl.constexpr,
 ):
     """
-    foward epilogue
+    forward epilogue
     """
     pid_m = tl.program_id(axis=0)
 

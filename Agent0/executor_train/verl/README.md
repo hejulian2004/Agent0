@@ -163,7 +163,7 @@ SGLang is fully supported with verl, and SGLang RL Group is working extensively 
 
 ## Upgrade to FSDP2
 
-verl is fully embracing FSDP2! FSDP2 is recommended by torch distributed team, providing better throughput and memory usage, and is composible with other features (e.g. torch.compile). To enable FSDP2, simply use verl main and set the following options:
+verl is fully embracing FSDP2! FSDP2 is recommended by torch distributed team, providing better throughput and memory usage, and is composable with other features (e.g. torch.compile). To enable FSDP2, simply use verl main and set the following options:
 ```
 actor_rollout_ref.ref.strategy=fsdp2
 actor_rollout_ref.actor.strategy=fsdp2
