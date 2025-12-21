@@ -35,7 +35,7 @@ pip install -r requirements.txt
 
 # For curriculum training
 cd curriculum_train/
-pip install -e verl
+pip install -r requirements.txt
 
 # For executor training
 cd executor_train/
