@@ -156,7 +156,7 @@ class AgentRayPPOTrainer(RayPPOTrainer):
             AdvantageEstimator.GPG,
             MyAdvantageEstimator.TDGRPO,
             MyAdvantageEstimator.GAPO,
-            MyAdvantageEstimator.EGRPO
+            MyAdvantageEstimator.ADPO
         ]:
             self.use_critic = False
         else:
@@ -451,6 +451,13 @@ class AgentRayPPOTrainer(RayPPOTrainer):
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
+
+                    # added for adpo: ensure score is in batch.batch as a tensor
+                    if "score" in batch.non_tensor_batch:
+                        batch.batch["score"] = torch.tensor(batch.non_tensor_batch["score"],
+                                                          device=batch.batch["responses"].device,
+                                                          dtype=torch.float32)
+
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
                     # Balance the number of valid tokens across DP ranks.

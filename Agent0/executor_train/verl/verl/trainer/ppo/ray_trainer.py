@@ -271,6 +271,29 @@ def compute_advantage(
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+
+    elif adv_estimator == "adpo":
+        # calculate advantage estimator
+        adv_estimator_fn = core_algos.get_adv_estimator_fn(adv_estimator)
+        adv_kwargs = {
+            "token_level_rewards": data.batch["token_level_rewards"],
+            "response_mask": data.batch["response_mask"],
+            "config": config,
+        }
+        if "score" in data.non_tensor_batch:
+            adv_kwargs["score"] = data.non_tensor_batch["score"]
+        elif "score" in data.batch:
+            adv_kwargs["score"] = data.batch["score"]
+        else:
+            raise KeyError("Cannot find Score for ADPO!")
+
+        if "uid" in data.non_tensor_batch:
+            adv_kwargs["index"] = data.non_tensor_batch["uid"]
+
+        advantages, returns = adv_estimator_fn(**adv_kwargs)
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+
     else:
         # handle all other adv estimator type other than GAE and GRPO
         adv_estimator_fn = core_algos.get_adv_estimator_fn(adv_estimator)
@@ -283,15 +306,7 @@ def compute_advantage(
             adv_kwargs["index"] = data.non_tensor_batch["uid"]
         if "reward_baselines" in data.batch:  # optional
             adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
-
-        # calculate advantage estimator
-        if adv_estimator == "egrpo":
-            if "score" not in data.non_tensor_batch:
-                raise KeyError("Cannot find Score!")
-            adv_kwargs["score"] = data.non_tensor_batch["score"]
-        advantages, returns = adv_estimator_fn(**adv_kwargs)
-        data.batch["advantages"] = advantages
-        data.batch["returns"] = returns
+    
     return data
 
 
@@ -380,7 +395,7 @@ class RayPPOTrainer:
             AdvantageEstimator.RLOO,
             AdvantageEstimator.OPO,
             AdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE,
-            AdvantageEstimator.GPG,
+            AdvantageEstimator.GPG
         ]:
             self.use_critic = False
         else:

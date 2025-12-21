@@ -392,10 +392,11 @@ class DataParallelPPOActor(BasePPOActor):
             "position_ids",
             "old_log_probs",
             "advantages",
+            "score",
         ]
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
-        batch = data.select(batch_keys=select_keys).batch
+        batch = data.select(batch_keys=select_keys, strict=False).batch
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 
         # Split to make minibatch iterator for updating the actor
@@ -508,14 +509,18 @@ class DataParallelPPOActor(BasePPOActor):
 
                     else:
                         policy_loss_fn = get_policy_loss_fn(loss_mode)
-                        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
-                            old_log_prob=old_log_prob,
-                            log_prob=log_prob,
-                            advantages=advantages,
-                            response_mask=advantages,
-                            loss_agg_mode=loss_agg_mode,
-                            config=self.config,
-                        )
+                        policy_loss_kwargs = {
+                            "old_log_prob": old_log_prob,
+                            "log_prob": log_prob,
+                            "advantages": advantages,
+                            "response_mask": response_mask,
+                            "loss_agg_mode": loss_agg_mode,
+                            "config": self.config,
+                        }
+                        if "score" in data:
+                            policy_loss_kwargs["score"] = data["score"]
+
+                        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(**policy_loss_kwargs)
 
                     if entropy_coeff != 0:
                         entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
