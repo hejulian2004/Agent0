@@ -30,17 +30,21 @@ git clone https://github.com/aiming-lab/Agent0.git
 
 cd Agent0/Agent0
 
-# Install the required packages
-pip install -r requirements.txt
-
 # For curriculum training
+conda create -n curriculum python==3.12
+conda activate curriculum
+pip install -r requirements.txt
 cd curriculum_train/
 pip install -r requirements.txt
 
 # For executor training
+conda deactivate
+conda create -n executor python==3.12
+conda activate executor
+cd ../
+pip install -r requirements.txt
 cd executor_train/
 pip install -e verl
-
 pip install "flash-attn==2.8.3" --no-build-isolation
 ```
 
