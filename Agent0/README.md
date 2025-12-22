@@ -33,9 +33,9 @@ cd Agent0/Agent0
 # For curriculum training
 conda create -n curriculum python==3.12
 conda activate curriculum
-pip install -r requirements.txt
 cd curriculum_train/
 pip install -r requirements.txt
+pip install flash-attn==2.7.4.post1 --no-build-isolation
 
 # For executor training
 conda deactivate
