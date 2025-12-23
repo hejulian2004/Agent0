@@ -35,7 +35,7 @@ conda create -n curriculum python==3.12
 conda activate curriculum
 cd curriculum_train/
 pip install -r requirements.txt
-pip install flash-attn==2.7.4.post1 --no-build-isolation
+pip install flash-attn==2.7.4.post1 --no-build-isolation --no-cache-dir
 
 # For executor training
 conda deactivate
@@ -45,7 +45,7 @@ cd ../
 pip install -r requirements.txt
 cd executor_train/
 pip install -e verl
-pip install "flash-attn==2.8.3" --no-build-isolation
+pip install "flash-attn==2.8.3" --no-build-isolation --no-cache-dir
 ```
 
 ### 2. Sandbox Service
