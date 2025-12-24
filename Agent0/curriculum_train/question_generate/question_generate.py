@@ -4,7 +4,6 @@ from transformers import AutoTokenizer
 import argparse
 from typing import List
 from vllm.outputs import RequestOutput
-from evaluation.datasets_loader import get_dataset_handler
 import json
 import regex as re
 import os
@@ -56,10 +55,6 @@ def main(args):
         # gpu_memory_utilization=0.8,
         seed=int(args.suffix),
     )
-    dataset_handler = get_dataset_handler("math")
-    questions, answers = dataset_handler.load_data()
-    question = questions[0]
-    answer = answers[0]
     chat = [
         {
             "role": "system",
