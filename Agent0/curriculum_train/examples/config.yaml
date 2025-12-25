@@ -1,6 +1,6 @@
 data:
-  train_files: /data_r1v4/data_r1v4/peng.xia/repo/R-Zero/data/math12k/data
-  val_files: /data_r1v4/data_r1v4/peng.xia/repo/R-Zero/data/math12k/data
+  train_files: hiyouga/math12k@train
+  val_files: hiyouga/math12k@test
   prompt_key: problem
   answer_key: answer
   image_key: images
