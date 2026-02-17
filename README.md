@@ -21,7 +21,7 @@
 ## 🔥 News
 
 - **[11/29/2025]** The code of Agent0 was released!
-- **[11/26/2025]** We’ve set up a Discord server and WeChat group to make it easier to collaborate and exchange ideas on this project. Welcome to join the Group to share your thoughts, ask questions, or contribute your ideas! 🔥 Join our [Discord](https://discord.gg/WDjBNRbu) and [WeChat Group](figs/wechat_group.jpg) Now!
+- **[11/26/2025]** We’ve set up a Discord server and WeChat group to make it easier to collaborate and exchange ideas on this project. Welcome to join the Group to share your thoughts, ask questions, or contribute your ideas! 🔥 Join our [Discord](https://discord.gg/ZdWFRAs9) and [WeChat Group](figs/wechat_group.jpg) Now!
 - **[11/25/2025]** Agent0-VL was released on [arXiv](https://arxiv.org/abs/2511.19900)!
 - **[11/20/2025]** Agent0 paper was released on [arXiv](https://arxiv.org/abs/2511.16043)!
 
