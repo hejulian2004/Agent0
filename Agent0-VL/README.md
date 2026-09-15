@@ -549,3 +549,54 @@ backend = create_teacher_backend()  # reads AGENT0_TEACHER_* from the environmen
 chunk = backend.generate_next(context, role="solver", images=images)
 print(chunk.text)
 ```
+
+#### WSL/Linux training workspace and proxy
+
+The Linux training workspace is the WSL checkout at
+`/home/hejulian/Agent0/Agent0-VL`. The current smoke inputs are copied locally
+there (the Windows originals are retained for provenance):
+
+- `data/smoke/local_qwen_27b_10_per_dataset/sft_records.jsonl` — 110 SFT records;
+- `data/smoke/local_qwen_27b_10_per_dataset/rl/train_multimodal.parquet` — 60 RL task rows;
+- `data/smoke/local_qwen_27b_10_per_dataset/assets/` — image files referenced by SFT.
+
+The WSL user's `~/.bashrc` contains an idempotent `agent0-wsl-proxy` block. It
+derives the current WSL default gateway and exports the Windows HTTP proxy on
+port `7890` for `git`, `pip`, `conda`, and other HTTP clients. Set
+`AGENT0_DISABLE_PROXY=1` for a shell-local bypass, or set
+`AGENT0_PROXY_HOST`/`AGENT0_PROXY_PORT` to override discovery. SSH/SCP is not
+configured through this proxy. Because the Windows proxy currently listens on
+`127.0.0.1`, the proxy application must have **Allow LAN** enabled for WSL to
+reach it; the WSL environment variables alone cannot expose a loopback-only
+Windows listener.
+
+#### Qwen2.5-VL-7B 4-bit QLoRA smoke fine-tune
+
+The reproducible Linux entry point is `tools/train_qlora_smoke.py`. It uses
+the `agent0vl` Conda environment, snapshots both input files and SFT assets,
+records SHA-256/model/configuration provenance, makes a non-destructive full
+base-model backup, freezes `model.visual` (vision tower and merger), and adds
+LoRA only to language-model layers. The RL Parquet is deliberately recorded as
+held-out rollout/evaluation input; it is not used as SFT loss because it has no
+assistant target. Actual GRPO/SERC training remains a separate online RL stage.
+
+Example from WSL (use a new output directory for every run):
+
+```bash
+cd /home/hejulian/Agent0
+source /home/hejulian/miniconda3/etc/profile.d/conda.sh
+conda activate agent0vl
+PYTHONPATH=/home/hejulian/Agent0 python Agent0-VL/tools/train_qlora_smoke.py \
+  --model /home/hejulian/models/Qwen2.5-VL-7B-Instruct-ms \
+  --sft-data /home/hejulian/Agent0/Agent0-VL/data/smoke/local_qwen_27b_10_per_dataset/sft_records.jsonl \
+  --rl-data /home/hejulian/Agent0/Agent0-VL/data/smoke/local_qwen_27b_10_per_dataset/rl/train_multimodal.parquet \
+  --output-dir /home/hejulian/Agent0/Agent0-VL/data/runs/qlora_smoke_qwen25vl7b_YYYYMMDD_HHMMSS \
+  --base-model-backup /home/hejulian/models/backups/Qwen2.5-VL-7B-Instruct-ms \
+  --epochs 3 --max-length 1536 --max-pixels 200704 \
+  --gradient-accumulation-steps 4 --lora-rank 8 --lora-alpha 16
+```
+
+The run directory contains `run_manifest.json`, `metrics.jsonl`,
+`freeze_report.json`, `adapter_final/`, checkpoints, the input snapshot, and
+`loss_curve.png`. The smoke configuration is sized for a 16 GB RTX 5080 and
+is an implementation smoke test, not the paper's full-scale 200k/40k build.
