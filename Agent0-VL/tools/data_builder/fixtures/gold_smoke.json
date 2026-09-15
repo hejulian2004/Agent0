@@ -1,0 +1,226 @@
+[
+  {
+    "name": "reasoning_basic",
+    "case_type": "solver",
+    "text": "<think>Compare the two quantities before choosing the next action.</think>",
+    "expected_turn_type": "reasoning"
+  },
+  {
+    "name": "reasoning_after_observation",
+    "case_type": "solver",
+    "text": "The observed value is consistent with the previous assumption, so I will continue reasoning.",
+    "expected_turn_type": "reasoning"
+  },
+  {
+    "name": "tool_single_python",
+    "case_type": "solver",
+    "text": "<think>Compute the expression.</think>\n```python\nprint(2 + 2)\n```",
+    "expected_turn_type": "tool",
+    "expected_code_count": 1
+  },
+  {
+    "name": "tool_py_alias",
+    "case_type": "solver",
+    "text": "```py\nprint(6 * 7)\n```",
+    "expected_turn_type": "tool",
+    "expected_code_count": 1
+  },
+  {
+    "name": "tool_multiple_success",
+    "case_type": "solver",
+    "text": "```python\nprint(1)\n```\n```python\nprint(2)\n```",
+    "expected_turn_type": "tool",
+    "expected_code_count": 2,
+    "call_execution_success": [true, true],
+    "step_tool_success_any": true,
+    "step_tool_success_all": true
+  },
+  {
+    "name": "tool_mixed_success_failure",
+    "case_type": "solver",
+    "text": "```python\nprint(1)\n```\n```python\nraise RuntimeError('expected')\n```",
+    "expected_turn_type": "tool",
+    "expected_code_count": 2,
+    "call_execution_success": [true, false],
+    "step_tool_success_any": true,
+    "step_tool_success_all": false
+  },
+  {
+    "name": "tool_all_failure",
+    "case_type": "solver",
+    "text": "```python\nraise ValueError('expected')\n```\n```python\n1 / 0\n```",
+    "expected_turn_type": "tool",
+    "expected_code_count": 2,
+    "call_execution_success": [false, false],
+    "step_tool_success_any": false,
+    "step_tool_success_all": false
+  },
+  {
+    "name": "final_basic",
+    "case_type": "solver",
+    "text": "<think>The calculation is complete.</think>\nCONFIDENCE: 0.95\nFINAL_ANSWER: 42",
+    "expected_turn_type": "final",
+    "expected_answer": "42",
+    "expected_confidence": 0.95
+  },
+  {
+    "name": "final_latex",
+    "case_type": "solver",
+    "text": "CONFIDENCE: 0.8\nFINAL_ANSWER: \\frac{3}{4}",
+    "expected_turn_type": "final",
+    "expected_answer": "\\frac{3}{4}"
+  },
+  {
+    "name": "final_code_conflict",
+    "case_type": "solver",
+    "text": "```python\nprint(4)\n```\nCONFIDENCE: 0.9\nFINAL_ANSWER: 4",
+    "expected_turn_type": "invalid"
+  },
+  {
+    "name": "final_multiple",
+    "case_type": "solver",
+    "text": "CONFIDENCE: 0.9\nFINAL_ANSWER: 4\nFINAL_ANSWER: 5",
+    "expected_turn_type": "invalid"
+  },
+  {
+    "name": "final_missing_confidence",
+    "case_type": "solver",
+    "text": "FINAL_ANSWER: 4",
+    "expected_turn_type": "invalid"
+  },
+  {
+    "name": "final_empty_answer",
+    "case_type": "solver",
+    "text": "CONFIDENCE: 0.9\nFINAL_ANSWER:",
+    "expected_turn_type": "invalid"
+  },
+  {
+    "name": "final_confidence_out_of_range",
+    "case_type": "solver",
+    "text": "CONFIDENCE: 1.2\nFINAL_ANSWER: 4",
+    "expected_turn_type": "invalid"
+  },
+  {
+    "name": "boxed_canonical_disabled",
+    "case_type": "solver",
+    "text": "<think>Legacy answer syntax.</think>\n\\boxed{42}",
+    "expected_turn_type": "reasoning",
+    "expected_error": "legacy_boxed_ignored"
+  },
+  {
+    "name": "boxed_legacy_enabled",
+    "case_type": "solver",
+    "text": "<think>Legacy answer syntax.</think>\n\\boxed{42}",
+    "allow_legacy_boxed": true,
+    "expected_turn_type": "final",
+    "expected_answer": "42"
+  },
+  {
+    "name": "canonical_wins_over_boxed",
+    "case_type": "solver",
+    "text": "\\boxed{wrong_old_answer}\nCONFIDENCE: 0.9\nFINAL_ANSWER: correct_answer",
+    "expected_turn_type": "final",
+    "expected_answer": "correct_answer"
+  },
+  {
+    "name": "tool_output_final_marker_is_not_solver_final",
+    "case_type": "observation",
+    "stdout": "FINAL_ANSWER: 999",
+    "expected_final_answer": null
+  },
+  {
+    "name": "malformed_python_block",
+    "case_type": "solver",
+    "text": "```python\nprint(1)",
+    "expected_turn_type": "invalid"
+  },
+  {
+    "name": "verification_valid",
+    "case_type": "verification",
+    "text": "{\"step_index\": 1, \"score\": 0.9, \"confidence\": 0.95, \"critique\": \"Correct.\", \"tool_check\": true}",
+    "expected_valid": true
+  },
+  {
+    "name": "verification_wrong_step",
+    "case_type": "verification",
+    "text": "{\"step_index\": 0, \"score\": 0.9, \"confidence\": 0.95, \"critique\": \"Wrong index.\"}",
+    "expected_valid": false
+  },
+  {
+    "name": "verification_invalid_range",
+    "case_type": "verification",
+    "text": "{\"step_index\": 1, \"score\": 2.0, \"confidence\": 0.95, \"critique\": \"Out of range.\"}",
+    "expected_valid": false
+  },
+  {
+    "name": "repair_patch_valid",
+    "case_type": "repair",
+    "text": "{\"action\": \"PATCH\", \"target_step\": 1, \"patch_type\": \"code\", \"new_content\": \"print(4)\", \"justification\": \"Fix arithmetic.\"}",
+    "expected_valid": true
+  },
+  {
+    "name": "repair_no_change_valid",
+    "case_type": "repair",
+    "text": "{\"action\": \"NO_CHANGE\", \"target_step\": 1, \"reason\": \"No substantive issue.\"}",
+    "expected_valid": true
+  },
+  {
+    "name": "repair_invalid",
+    "case_type": "repair",
+    "text": "{\"action\": \"PATCH\", \"target_step\": 1, \"patch_type\": \"unknown\", \"new_content\": \"x\"}",
+    "expected_valid": false
+  },
+  {
+    "name": "step_eight_final_is_valid",
+    "case_type": "trajectory",
+    "step_index": 8,
+    "turn_type": "final",
+    "termination_reason": "final_answer",
+    "expected_valid": true
+  },
+  {
+    "name": "max_steps_without_final_answer",
+    "case_type": "trajectory",
+    "step_count": 8,
+    "termination_reason": "max_steps_without_final_answer",
+    "expected_valid": true
+  },
+  {
+    "name": "stdout_character_truncation",
+    "case_type": "observation",
+    "stdout_length": 600,
+    "stderr_length": 0,
+    "expected_stdout_length": 512
+  },
+  {
+    "name": "stderr_character_truncation",
+    "case_type": "observation",
+    "stdout_length": 0,
+    "stderr_length": 600,
+    "expected_stderr_length": 512
+  },
+  {
+    "name": "combined_observation_token_truncation",
+    "case_type": "observation",
+    "stdout_length": 400,
+    "stderr_length": 400,
+    "max_observation_tokens": 512,
+    "expected_second_stage_truncation": true
+  },
+  {
+    "name": "single_assistant_sft_record",
+    "case_type": "sft",
+    "messages": [
+      {"role": "user", "content": "[CANDIDATE_SOLVER_STEP]\nwrong"},
+      {"role": "user", "content": "[VERIFIER_REQUEST]"},
+      {"role": "assistant", "content": "{\"score\": 0}"}
+    ],
+    "expected_valid": true
+  },
+  {
+    "name": "conversation_state_deep_copy",
+    "case_type": "state",
+    "expected_isolated": true,
+    "mutations": ["messages", "observation_events", "boundaries", "derived_images"]
+  }
+]

@@ -330,3 +330,222 @@ If you find Agent0-VL helpful for your research, please cite our paper:
 - [vLLM](https://github.com/vllm-project/vllm) — fast rollout inference
 - [SandboxFusion](https://github.com/bytedance/SandboxFusion) — sandbox execution service
 - Qwen team for the base models
+
+---
+
+## 📦 Dataset Acquisition Status / 数据下载状态
+
+The paper lists the source datasets used for SFT and RL, but does not publish the
+exact byte-level 200k-trajectory SFT or 40k-task RL build manifest. The files
+below therefore constitute an auditable reconstruction of the public data
+supply chain, not a claim that the authors' unreleased training mixture has been
+recovered exactly. See the detailed [raw download report](data/raw/raw_download_report.json)
+for source URLs, revisions, local paths, file sizes, and SHA-256 fingerprints.
+
+当前已下载文件保存在 `data/raw/.staging/`，共记录 28 个已校验 artifact，约
+39.04 GiB。Phase 1.5 的 immutable acquisition/verification 发布尚未执行。
+
+| Dataset | Intended use | Source and status |
+|---|---|---|
+| Geometry3K | SFT Stage 1 | [Mainland ModelScope](https://www.modelscope.cn/datasets/OpenDataLab/Geometry3K.git); train/val/test archives downloaded |
+| GeoQA | SFT Stage 1 | [Official repository](https://github.com/chen-judge/GeoQA) and official `data.zip` downloaded from its [Google Drive](https://drive.google.com/drive/folders/1fiLTJUq7EPiZHs6AxundNfNEDLw4gtP5) |
+| Mulberry | SFT | [Hugging Face](https://huggingface.co/datasets/HuanjinYao/Mulberry-SFT); JSON and 22 GB image tar downloaded and hashed after merge |
+| MM-Eureka | SFT Stage 2 | [Hugging Face](https://huggingface.co/datasets/FanqingM/MM-Eureka-Dataset); K12, MMPR, JSONL, and blank image downloaded |
+| ReTool | SFT | [Hugging Face](https://huggingface.co/datasets/swordfaith/ReTool-SFT-multi-turn); `train_2000.parquet` downloaded |
+| MathVerse | RL candidate | [Hugging Face](https://huggingface.co/datasets/AI4Math/MathVerse); public `testmini` release only, eval-only until an explicit split policy is applied |
+| MathVista | RL candidate | [Hugging Face](https://huggingface.co/datasets/AI4Math/MathVista); public `test`/`testmini` release only, eval-only until an explicit split policy is applied |
+| We-Math | RL candidate | [Mainland ModelScope](https://www.modelscope.cn/datasets/waltonfuture/We-Math.git); `We-Math.zip` downloaded |
+| arXivQA | RL candidate | [Hugging Face](https://huggingface.co/datasets/MMInstruction/ArxivQA); JSONL and 7.95 GB image archive downloaded |
+| ChartQA | RL candidate | [Official project](https://github.com/vis-nlp/ChartQA) and [full HF mirror](https://huggingface.co/datasets/ahmed-masry/ChartQA); train/val/test archive downloaded |
+| ThinkLite-VL | RL candidate | [Hugging Face](https://huggingface.co/datasets/russwang/ThinkLite-VL-70k); 70k Parquet downloaded, including its binary image column |
+| GeoQA community port | Fallback/comparison only | [Community HF port](https://huggingface.co/datasets/hz2475/geoQA); retained for comparison and not treated as authoritative |
+
+### Acquisition notes
+
+- Mainland ModelScope was preferred where a usable source was available. HTTP
+  downloads that required it used the local `127.0.0.1:7890` proxy.
+- SSH/SCP transfers to or from `txy` were direct and explicitly did not use the
+  proxy (`ProxyCommand=none`).
+- Every listed artifact has a recorded size and SHA-256 fingerprint. Temporary
+  range parts and diagnostic files are retained locally but are excluded from
+  the artifact list.
+- MathVerse and MathVista files currently available here are public evaluation
+  releases; they must not be silently routed into formal training.
+- Before training, Phase 1.5 must promote these raw inputs into immutable
+  acquisition and versioned verification records, then apply official split and
+  license eligibility policies.
+
+### Reproducible Teacher experiment setup
+
+The data builder uses one `generate_next()` interface for both remote and local
+Teacher generation. Select the backend with `AGENT0_TEACHER_BACKEND`; do not put
+API keys in JSONL, Parquet, manifests, source files, or Git.
+
+Use the following PowerShell snippets from the repository root. `$env:` only
+changes the current shell session and is preferred for experiments because the
+secret is not persisted by Windows.
+
+#### Option A: hosted OpenAI-compatible VLM
+
+```powershell
+$env:AGENT0_TEACHER_BACKEND = "openai_compatible"
+$env:AGENT0_TEACHER_BASE_URL = "https://your-provider.example/v1"
+$env:AGENT0_TEACHER_MODEL = "your-vision-model"
+$env:AGENT0_TEACHER_API_KEY = "<YOUR_API_KEY>"
+$env:AGENT0_TEACHER_TEMPERATURE = "0.2"
+$env:AGENT0_TEACHER_TOP_P = "0.95"
+$env:AGENT0_TEACHER_MAX_TOKENS = "2048"
+$env:AGENT0_TEACHER_SEED = "42"
+```
+
+The endpoint must implement `POST /chat/completions` and support vision input
+for image tasks. The configured base URL should normally end at `/v1`; the
+backend appends `/chat/completions` automatically. If the provider is reachable
+only through the local HTTP proxy, configure the proxy for HTTP requests in the
+shell; this does not change the direct SSH/SCP rule for `txy`.
+
+#### Option B: local vLLM OpenAI-compatible server
+
+```powershell
+$env:AGENT0_TEACHER_BACKEND = "openai_compatible"
+$env:AGENT0_TEACHER_BASE_URL = "http://127.0.0.1:8000/v1"
+$env:AGENT0_TEACHER_MODEL = "Qwen2.5-VL-7B-Instruct"
+$env:AGENT0_TEACHER_ALLOW_ANONYMOUS = "true"
+```
+
+This uses the same API backend but does not require a hosted API Key when the
+local server has authentication disabled.
+
+#### Option C: local Transformers/VLM checkpoint
+
+```powershell
+$env:AGENT0_TEACHER_BACKEND = "hf"
+$env:AGENT0_TEACHER_CHECKPOINT = "D:\models\Qwen2.5-VL-7B-Instruct"
+$env:AGENT0_TEACHER_REVISION = "<optional-commit-or-tag>"
+$env:AGENT0_TEACHER_DEVICE = "auto"
+$env:AGENT0_TEACHER_DEVICE_MAP = "auto"
+$env:AGENT0_TEACHER_DTYPE = "bfloat16"
+$env:AGENT0_TEACHER_MAX_TOKENS = "2048"
+$env:AGENT0_TEACHER_SEED = "42"
+```
+
+No API endpoint or API Key is used in this mode. The checkpoint must be
+compatible with the installed `transformers` version and provide a multimodal
+processor for image tasks.
+
+#### Check the active configuration before generation
+
+```powershell
+python -c "from tools.data_builder.backends import TeacherConfig; import json; print(json.dumps(TeacherConfig.from_env().public_dict(), indent=2))"
+```
+
+The output intentionally shows only `api_key_configured: true/false`, never the
+secret itself. To switch modes in the same PowerShell session, set
+`AGENT0_TEACHER_BACKEND` and the corresponding variables again; the factory
+will select the new backend on the next `create_teacher_backend()` call.
+
+#### Local Qwen3.8-27B smoke build on a 16 GB RTX 5080
+
+For a bounded local experiment, the repository includes
+`tools/data_builder/smoke_build_local.py`. It selects exactly 10 samples from
+each of the 11 formal paper sources (110 requested records), copies selected
+images into an isolated smoke directory, and asks the local model for one
+canonical `FINAL_TURN` per sample. This is a single-turn protocol smoke test;
+it is not the full tool-in-the-loop/verifier/repair data builder.
+
+The following conservative `llama.cpp` profile is intended to avoid VRAM
+pressure on a 16 GB card: one slot, 4K context, Q4 KV cache, CPU mmproj, and a
+1024-token image cap. Do not run another CUDA-heavy workload at the same time.
+
+```powershell
+Set-Location D:\coding\Qwen3.8-27B
+& .\llama.cpp\llama-server.exe `
+  --model .\models\Qwen3.8-27B-NVFP4-Q5K-no-MTP.gguf `
+  --device CUDA0 `
+  --mmproj .\models\mmproj-Qwen3.8-27B-F16.gguf `
+  --no-mmproj-offload `
+  --image-min-tokens 1024 --image-max-tokens 1024 `
+  --ctx-size 4096 --parallel 1 --no-kv-unified `
+  --cache-type-k q4_0 --cache-type-v q4_0 `
+  --gpu-layers all --flash-attn on --fit off `
+  --batch-size 64 --ubatch-size 16 --threads 6 --threads-batch 6 `
+  --no-cache-prompt --jinja --reasoning off --reasoning-budget 0 `
+  --host 127.0.0.1 --port 8001
+```
+
+With the server listening on `http://127.0.0.1:8001`, run the smoke builder
+from the repository root:
+
+```powershell
+$env:PYTHONIOENCODING = "utf-8"
+$env:PYTHONPATH = (Get-Location).Path
+& .\.venv\Scripts\python.exe -m tools.data_builder.smoke_build_local `
+  --base-url http://127.0.0.1:8001/v1 `
+  --model Qwen3.8-27B-NVFP4-Q5K-no-MTP `
+  --allow-anonymous `
+  --samples-per-dataset 10 `
+  --max-attempts 2 `
+  --max-tokens 384
+```
+
+The smoke output is written to
+`data/smoke/local_qwen_27b_10_per_dataset/`:
+
+- `sft_records.jsonl` — one assistant target per record;
+- `build_report.json` — source counts, backend metadata, and protocol versions;
+- `selection_manifest.jsonl` — selected source rows and image hashes;
+- `manual_review_queue.jsonl` — unresolved invalid generations;
+- `manual_review_resolved.jsonl` — audit trail for later successful retries;
+- `assets/` — copied image inputs used by the local requests.
+
+The completed local smoke run produced 110 valid records: 10 for each formal
+source. MathVerse, MathVista, and We-Math use their locally available
+`testmini` rows and are therefore debug-only; they must not enter a formal
+training build until an allowed training split is available. The raw source
+license status is also retained in each record and does not become a formal
+training license approval.
+
+#### RL task-row smoke build
+
+The RL smoke exporter is
+`tools/data_builder/smoke_build_rl.py`. It reuses the 10-per-dataset source
+selection from `sft_records.jsonl` and creates one RL task row per sample for
+the six RL-candidate sources in the paper: MathVerse, MathVista, We-Math,
+arXivQA, ChartQA, and ThinkLite-VL. It does not call the Teacher and it does
+not store `n=8`; the rollout repeats each task at runtime.
+
+Run it from the repository root:
+
+```powershell
+$env:PYTHONIOENCODING = "utf-8"
+$env:PYTHONPATH = (Get-Location).Path
+& .\.venv\Scripts\python.exe -m tools.data_builder.smoke_build_rl `
+  --samples-per-dataset 10 `
+  --allow-eval-only
+```
+
+The output is written to
+`data/smoke/local_qwen_27b_10_per_dataset/rl/`:
+
+- `train_multimodal.parquet` — 60 rows, 10 per RL-candidate dataset, with
+  binary image bytes in the `images` column;
+- `rl_build_report.json` — row counts, split/license gates, and protocol
+  versions;
+- `rl_selection_manifest.jsonl` — task IDs and image/question hashes.
+
+This smoke build completed with 60 rows. Thirty MathVerse/MathVista/We-Math
+rows come from the locally available `testmini` evaluation release and are
+debug-only. Because Phase 1.5 verification records have not been published
+yet, the report marks all rows as not formally training-eligible. The output
+is therefore suitable for RL loader/rollout smoke testing, not formal RL
+training.
+
+From Python, both modes use the same factory and generation interface:
+
+```python
+from tools.data_builder.backends import create_teacher_backend
+
+backend = create_teacher_backend()  # reads AGENT0_TEACHER_* from the environment
+chunk = backend.generate_next(context, role="solver", images=images)
+print(chunk.text)
+```
