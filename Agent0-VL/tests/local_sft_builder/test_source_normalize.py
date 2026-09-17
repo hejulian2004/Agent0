@@ -75,16 +75,58 @@ def _retool_record(
     question: str = "What is 17 * 3?",
     answer: str = "51",
 ) -> dict:
+    """A ReTool row shaped like the real ``train_2000.parquet``.
+
+    The real rows are multi-turn: a ``system`` turn, a ``user`` turn carrying the
+    ``**user question:**`` marker plus the dataset's own trailing format
+    instruction, ``assistant`` turns that request tool calls, ``tool`` turns with
+    the interpreter output, and a final ``assistant`` turn whose reference answer
+    is wrapped as ``<answer>\\boxed{...}</answer>``.  Everything before that
+    wrapper is the reference trajectory's reasoning, so the raw assistant text
+    must never be used as the reference label.
+
+    The earlier fixture used a bare two-message record with a bare numeric
+    answer, which is why the reference-answer defect below stayed invisible.
+    """
+
     return {
         "messages": [
             {
-                "role": "user",
+                "role": "system",
                 "content": (
-                    "Solve the task with tools.\n\n"
-                    f"**user question:**\n{question}"
+                    "You are a helpful assistant that can solve math problems "
+                    "with interaction Code Interpreter by Python code."
                 ),
             },
-            {"role": "assistant", "content": answer},
+            {
+                "role": "user",
+                "content": (
+                    "Solve the following problem step by step. You now have the "
+                    "ability to selectively write executable Python code to "
+                    "enhance your reasoning process.\n\n"
+                    f"**user question:**\n{question}\n\n"
+                    "Remember to place the final answer in the last part using "
+                    "the format: \n<answer>\noxed{'The final answer goes "
+                    "here.'}\n</answer>"
+                ),
+            },
+            {
+                "role": "assistant",
+                "content": (
+                    "Okay, so I need to work this out step by step. Let me compute "
+                    "it using code to ensure accuracy."
+                ),
+                "tool_calls": [{"id": "call_0", "type": "function"}],
+            },
+            {"role": "tool", "content": "17", "tool_call_id": "call_0"},
+            {
+                "role": "assistant",
+                "content": (
+                    "The verification confirms the intermediate result, so the "
+                    "reasoning holds.\n\n"
+                    f"<answer>\n\\boxed{{{answer}}}\n</answer>"
+                ),
+            },
         ]
     }
 
@@ -252,10 +294,47 @@ def test_extract_mulberry_without_answer_marker_raises() -> None:
 def test_extract_retool_is_text_only() -> None:
     extracted = extract_retool(_retool_record(question="What is 17 * 3?", answer="51"))
 
-    assert extracted.question == "What is 17 * 3?"
+    # ``extract_retool_question`` keeps everything after the marker verbatim,
+    # including the source dataset's own trailing format instruction.
+    assert extracted.question.startswith("What is 17 * 3?")
     assert extracted.ground_truth == "51"
     assert extracted.images == ()
     assert extracted.question.count("<image>") == 0
+
+
+def test_extract_retool_ground_truth_is_not_the_raw_reasoning_text() -> None:
+    """Regression: the whole assistant turn must never become the label.
+
+    The real ReTool rows end with ``<answer>\\boxed{...}</answer>`` after a long
+    reasoning prefix.  Taking the raw text made every one of the 2000 rows fail
+    the reference-answer check, and therefore the export gate, with a 0% yield.
+    """
+
+    record = _retool_record(question="What is 17 * 3?", answer="51")
+    assistant_text = record["messages"][-1]["content"]
+
+    assert "\\boxed{51}" in assistant_text
+    assert len(assistant_text) > 100  # the reference trajectory's reasoning
+    assert extract_retool(record).ground_truth == "51"
+
+
+def test_extract_retool_reference_falls_back_to_the_answer_block() -> None:
+    record = _retool_record(question="What is 17 * 3?", answer="51")
+    record["messages"][-1]["content"] = (
+        "The reasoning is complete.\n\n<answer>\n51\n</answer>"
+    )
+
+    assert extract_retool(record).ground_truth == "51"
+
+
+def test_extract_retool_without_any_reference_answer_raises() -> None:
+    record = _retool_record(question="What is 17 * 3?", answer="51")
+    record["messages"][-1]["content"] = "The reasoning is complete."
+
+    with pytest.raises(RowReviewRequired) as excinfo:
+        extract_retool(record)
+
+    assert excinfo.value.code == "retool_reference_answer_not_parseable"
 
 
 def test_extract_retool_without_marker_raises() -> None:

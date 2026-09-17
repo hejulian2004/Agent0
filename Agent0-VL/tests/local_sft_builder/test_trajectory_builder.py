@@ -6,7 +6,9 @@ in-memory task.  No dataset, endpoint or real sandbox is touched.
 
 from __future__ import annotations
 
+import ast
 import json
+from pathlib import Path
 
 import pytest
 
@@ -25,8 +27,8 @@ from tools.local_sft_builder.trajectory_builder import (
     FAILURE_MAX_TURNS,
     FAILURE_NO_TERMINAL,
     GROUND_TRUTH_ORIGIN,
-    SOLVER_PROMPT_SCAFFOLD,
     SOLVER_PROMPT_VERSION,
+    SOLVER_SYSTEM_PROMPT,
     STEP_VALIDATION_NOTE,
     TERMINAL_FINAL_ANSWER,
     RealTrajectoryBuilder,
@@ -126,20 +128,59 @@ def _audit(result, kind: str) -> dict:
 
 
 # --------------------------------------------------------------------------
-# Prompt scaffolding
+# Solver protocol: system prompt, not a local user-turn scaffold
 # --------------------------------------------------------------------------
 
 
-def test_scaffold_embeds_the_source_question_verbatim() -> None:
+def _upstream_evaluator_system_prompt() -> str:
+    """Extract ``_build_prompt``'s default system prompt from the upstream file.
+
+    Parsing the assignment with ``ast`` resolves Python's implicit string
+    concatenation, so this compares the real runtime string rather than a
+    whitespace-normalized approximation.  Importing the module itself is not an
+    option: it pulls in the full vLLM/verl stack.
+    """
+
+    evaluator = (
+        Path(__file__).resolve().parents[2]
+        / "verl"
+        / "evaluation"
+        / "agent0_evaluator.py"
+    )
+    tree = ast.parse(evaluator.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == "system_prompt":
+                value = node.value
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    return value.value
+    raise AssertionError("system_prompt assignment not found in agent0_evaluator.py")
+
+
+def test_solver_system_prompt_matches_the_upstream_runtime() -> None:
+    """The protocol is the source's, so it must not drift from it."""
+
+    upstream = _upstream_evaluator_system_prompt()
+
+    assert SOLVER_SYSTEM_PROMPT == upstream
+    assert "```python" in SOLVER_SYSTEM_PROMPT
+    assert "\\boxed{...}" in SOLVER_SYSTEM_PROMPT
+    # The local triple is not part of the source Solver protocol.
+    for marker in ("<think>", "CONFIDENCE:", "FINAL_ANSWER:"):
+        assert marker not in SOLVER_SYSTEM_PROMPT
+
+
+def test_user_content_is_the_source_question_verbatim() -> None:
     question = "<image>Question: What is the value of the largest bar?"
 
     content = build_solver_user_content(question)
 
-    assert question in content
+    assert content == question
     assert content.count("<image>") == question.count("<image>") == 1
-    assert content.startswith(SOLVER_PROMPT_SCAFFOLD)
     for marker in ("<think>", "```python", "CONFIDENCE:", "FINAL_ANSWER:"):
-        assert marker in content
+        assert marker not in content
 
 
 def test_scaffold_rejects_an_empty_question() -> None:
@@ -153,6 +194,42 @@ def test_scaffold_preserves_multiple_image_placeholders() -> None:
     content = build_solver_user_content(question)
 
     assert content.count("<image>") == 2
+
+
+def test_solver_system_prompt_is_sent_but_never_exported(tmp_path) -> None:
+    """The system message belongs to the request, not to the training row."""
+
+    builder, teacher, _sandbox = _builder(tmp_path, [FINAL_TURN])
+
+    result = builder.build_task(_task())
+
+    request_messages = teacher.requests[0]["messages"]
+    assert request_messages[0] == {
+        "role": "system",
+        "content": SOLVER_SYSTEM_PROMPT,
+    }
+    assert [message["role"] for message in request_messages[1:]] == ["user"]
+
+    exported_roles = {
+        message["role"] for message in result.rollout.messages
+    }
+    assert exported_roles == {"user", "assistant"}
+    assert result.candidates
+    assert "system" not in {
+        message["role"] for message in result.candidates[0].messages
+    }
+
+
+def test_solver_system_prompt_can_be_disabled(tmp_path) -> None:
+    builder, teacher, _sandbox = _builder(
+        tmp_path, [FINAL_TURN], solver_system_prompt=None
+    )
+
+    builder.build_task(_task())
+
+    assert [message["role"] for message in teacher.requests[0]["messages"]] == [
+        "user"
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -248,8 +325,11 @@ def test_multi_turn_rollout_executes_and_reinjects_the_observation(tmp_path) -> 
     assert messages[3]["content"] == FINAL_TURN
 
     # The stateless Teacher must be re-sent the whole context, plus the image.
+    # The system prompt is prepended to every request but is never part of the
+    # exported rollout, so 4 = system + user + assistant + user.
     assert len(teacher.requests) == 2
-    assert len(teacher.requests[1]["messages"]) == 3
+    assert len(teacher.requests[1]["messages"]) == 4
+    assert teacher.requests[1]["messages"][0]["role"] == "system"
     assert teacher.requests[1]["images"] == [IMAGE_PHYSICAL]
 
 
@@ -347,23 +427,45 @@ def test_mismatching_reference_answer_is_not_exportable(tmp_path) -> None:
     assert result.candidates == ()
 
 
-def test_final_answer_without_the_frozen_shape_is_rejected(tmp_path) -> None:
+def test_final_answer_without_the_local_confidence_marker_is_exportable(
+    tmp_path,
+) -> None:
+    """``CONFIDENCE:`` is local metadata, not part of the upstream protocol.
+
+    The upstream Solver prompt (``agent0_evaluator._build_prompt``) asks only for
+    a final answer; nothing in the author runtime or training entry requires a
+    confidence line.  The export gate must therefore not invent one.
+    """
+
     builder, _teacher, _sandbox = _builder(
         tmp_path, ["<think>done</think>\nFINAL_ANSWER: 9"]
     )
 
     result = builder.build_task(_task())
 
-    # The rollout terminates on the parser...
     assert result.rollout.terminal_reason == TERMINAL_FINAL_ANSWER
     assert result.rollout.answer_check.consistency == MATCH
-    # ...but the frozen export gate still requires CONFIDENCE.
     decision = _audit(result, "validation_decision")
-    assert decision["status"] == "review_required"
-    assert any(
-        reason.startswith("invalid_solver_final") for reason in decision["reasons"]
+    assert decision["status"] == "accepted"
+    assert decision["exportable"] is True
+    assert len(result.candidates) == 1
+
+
+def test_boxed_final_answer_in_the_author_format_is_exportable(tmp_path) -> None:
+    """End-to-end proof that the author's ``\\boxed{...}`` shape reaches export."""
+
+    builder, _teacher, _sandbox = _builder(
+        tmp_path, ["<think>The bar reaches 9.</think>\n\\boxed{9}"]
     )
-    assert result.candidates == ()
+
+    result = builder.build_task(_task())
+
+    assert result.rollout.terminal_reason == TERMINAL_FINAL_ANSWER
+    assert result.rollout.answer_check.consistency == MATCH
+    decision = _audit(result, "validation_decision")
+    assert decision["status"] == "accepted"
+    assert decision["exportable"] is True
+    assert len(result.candidates) == 1
 
 
 # --------------------------------------------------------------------------

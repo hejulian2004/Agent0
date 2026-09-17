@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from .answer_check import extract_final_answer
+
 
 PYTHON_BLOCK_RE = re.compile(
     r"```(?:python|py)?[ \t]*\r?\n?(.*?)```", re.DOTALL
@@ -20,7 +22,6 @@ THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 CONFIDENCE_RE = re.compile(
     r"CONFIDENCE:\s*([01](?:\.\d+)?|\.\d+)", re.IGNORECASE
 )
-FINAL_ANSWER_RE = re.compile(r"FINAL_ANSWER:\s*(.*)", re.IGNORECASE | re.DOTALL)
 
 
 class ProtocolError(ValueError):
@@ -54,26 +55,36 @@ def extract_python_blocks(text: str) -> tuple[str, ...]:
 def parse_solver_response(text: str) -> SolverResponse:
     blocks = extract_python_blocks(text)
     confidence_match = CONFIDENCE_RE.search(text)
-    final_match = FINAL_ANSWER_RE.search(text)
     confidence = float(confidence_match.group(1)) if confidence_match else None
     if confidence is not None and not 0.0 <= confidence <= 1.0:
         raise ProtocolError("confidence must be in [0, 1]")
-    final_answer = final_match.group(1).strip() if final_match else None
+    # Single source of truth for "what is the final answer": the source order is
+    # ``FINAL_ANSWER:`` then ``\boxed{...}`` (``agent0_evaluator._extract_answer``).
+    final_answer = extract_final_answer(text)
     return SolverResponse(
         text=text,
         tool_calls=tuple(PythonToolCall("PythonExec", block) for block in blocks),
         confidence=confidence,
         final_answer=final_answer,
-        is_complete=bool(THINK_RE.search(text) and confidence is not None and final_answer),
+        # The upstream evaluator terminates on a parseable final answer alone
+        # (``agent0_evaluator._extract_answer``).  ``<think>`` and ``CONFIDENCE:``
+        # are still parsed as metadata, but the source Solver protocol does not
+        # define them, so requiring them would invent a local contract.
+        is_complete=final_answer is not None,
     )
 
 
 def validate_solver_final(text: str, *, max_reasoning_steps: int = 8) -> SolverResponse:
+    """Require only what the upstream evaluator requires.
+
+    The source Solver protocol is a system prompt plus fenced Python blocks and
+    a final answer (``\\boxed{...}`` or ``FINAL_ANSWER:``).  ``<think>`` and
+    ``CONFIDENCE:`` are optional metadata, not part of the contract.
+    """
+
     response = parse_solver_response(text)
     if not response.is_complete:
-        raise ProtocolError(
-            "Solver final response must contain <think>, CONFIDENCE and FINAL_ANSWER"
-        )
+        raise ProtocolError("Solver final response must contain a final answer")
     if len(THINK_RE.findall(text)) > max_reasoning_steps:
         raise ProtocolError("Solver response exceeds max reasoning steps")
     return response

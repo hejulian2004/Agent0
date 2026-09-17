@@ -241,18 +241,21 @@ def test_generate_writes_the_full_run_directory(tmp_path, monkeypatch) -> None:
     assert _jsonl(output_dir / "stage1.jsonl") == rows
     assert _jsonl(output_dir / "stage2.jsonl") == []
 
-    # --- the Teacher really received the scaffold and the image -----------
+    # --- the Teacher received the source Solver protocol and the image -----
     assert len(requests) == 2
     assert requests[0]["headers"]["authorization"] == f"Bearer {CREDENTIAL_VALUE}"
-    first_blocks = requests[0]["payload"]["messages"][0]["content"]
+    first_messages = requests[0]["payload"]["messages"]
+    assert first_messages[0]["role"] == "system"
+    assert "```python" in first_messages[0]["content"]
+    first_blocks = first_messages[1]["content"]
     assert isinstance(first_blocks, list)
-    assert "FINAL_ANSWER:" in first_blocks[0]["text"]
-    assert "```python" in first_blocks[0]["text"]
-    assert first_blocks[1]["type"] == "image_url"
-    assert first_blocks[1]["image_url"]["url"].startswith("data:image/png;base64,")
-    assert "Question: What is the value of the largest bar?" in first_blocks[2]["text"]
-    # The second request must resend the accumulated context.
-    assert len(requests[1]["payload"]["messages"]) == 3
+    assert first_blocks[0]["type"] == "image_url"
+    assert first_blocks[0]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert "Question: What is the value of the largest bar?" in first_blocks[1]["text"]
+    # The exported user turn is the source question, not a local scaffold.
+    assert "FINAL_ANSWER:" not in first_blocks[1]["text"]
+    # The second request resends the accumulated context: system + 3 turns.
+    assert len(requests[1]["payload"]["messages"]) == 4
 
     # --- snapshots are content addressed ----------------------------------
     index_rows = _jsonl(output_dir / "snapshots" / "index.jsonl")
@@ -360,7 +363,12 @@ def test_generate_writes_the_full_run_directory(tmp_path, monkeypatch) -> None:
     assert manifest["builder"]["ground_truth_origin"] == GROUND_TRUTH_ORIGIN
     assert manifest["builder"]["task_analysis_enabled"] is False
     assert manifest["builder"]["step_validation"] == "not_performed_phase2b_p0"
-    assert manifest["builder"]["solver_prompt_has_system_role"] is False
+    # The Solver protocol travels as a system message on the request and is
+    # deliberately absent from the exported rows.
+    assert manifest["builder"]["solver_system_prompt_role"] == "system"
+    assert manifest["builder"]["solver_system_prompt_exported"] is False
+    assert isinstance(manifest["builder"]["solver_system_prompt_sha256"], str)
+    assert len(manifest["builder"]["solver_system_prompt_sha256"]) == 64
 
     # --- the credential never reaches any run artifact --------------------
     for path in output_dir.rglob("*"):

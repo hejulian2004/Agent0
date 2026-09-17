@@ -45,6 +45,15 @@ _FINAL_ANSWER_RE = re.compile(
 )
 _RETOOL_QUESTION_RE = re.compile(r"\*\*user question:\*\*\s*", re.IGNORECASE)
 
+# The real ReTool rows end with ``<answer>\boxed{...}</answer>`` and everything
+# before that is reasoning, so the raw assistant text must never be used as the
+# reference label.  The order follows ``agent0_evaluator._extract_answer``: the
+# boxed value first, then the ``<answer>`` block.
+_RETOOL_BOXED_RE = re.compile(r"\\boxed\{([^}]*)\}")
+_RETOOL_ANSWER_BLOCK_RE = re.compile(
+    r"<answer>\s*(.*?)\s*</answer>", re.DOTALL | re.IGNORECASE
+)
+
 # Raw artifact locations relative to the staging root.  These are the same on
 # Windows and on vcc, so the normalized source stays machine independent.
 _DEFAULT_RAW_MEMBERS: dict[str, str] = {
@@ -205,6 +214,28 @@ def extract_mulberry_final_answer(assistant_text: str) -> str | None:
     return candidate or None
 
 
+def extract_retool_final_answer(assistant_text: str) -> str | None:
+    """Return the ReTool reference answer, never the raw reasoning text.
+
+    The real source rows end with ``<answer>\\boxed{...}</answer>``; the whole
+    assistant message is the reference trajectory's reasoning, so it cannot be
+    used as the reference label.  Taking it verbatim made every ReTool row fail
+    the reference-answer check and therefore the export gate.
+    """
+
+    boxed = _RETOOL_BOXED_RE.findall(assistant_text)
+    if boxed:
+        candidate = _clean_reference_answer(boxed[-1])
+        if candidate:
+            return candidate
+    blocks = _RETOOL_ANSWER_BLOCK_RE.findall(assistant_text)
+    if blocks:
+        candidate = _clean_reference_answer(blocks[-1])
+        if candidate:
+            return candidate
+    return None
+
+
 def extract_retool_question(user_text: str) -> str | None:
     matches = list(_RETOOL_QUESTION_RE.finditer(user_text))
     if not matches:
@@ -267,7 +298,7 @@ def extract_retool(record: Mapping[str, Any]) -> ExtractedSource:
     )
     if assistant is None:
         raise RowReviewRequired("retool_record_missing_assistant_message")
-    ground_truth = _clean_reference_answer(assistant)
+    ground_truth = extract_retool_final_answer(assistant)
     if not ground_truth:
         raise RowReviewRequired("retool_reference_answer_not_parseable")
     # ReTool is text-only: this is what keeps the single image_root invariant.

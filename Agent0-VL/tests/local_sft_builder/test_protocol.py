@@ -40,6 +40,33 @@ def test_solver_final_and_role_json_parsers() -> None:
     assert repair["action"] == "PATCH"
 
 
+def test_solver_final_accepts_the_source_protocol_without_local_markers() -> None:
+    """The source Solver protocol has no ``<think>``/``CONFIDENCE:``/``FINAL_ANSWER:``.
+
+    ``agent0_evaluator._build_prompt`` asks only for fenced Python and a final
+    answer in ``\\boxed{...}``, so requiring the local triple would reject every
+    response the upstream runtime accepts.
+    """
+
+    response = validate_solver_final(
+        "<think>volume</think>\n"
+        "```python\nprint(32.54)\n```\n"
+        "The volume is $\\boxed{32.54}$ cm^3."
+    )
+
+    assert response.final_answer == "32.54"
+    assert response.confidence is None
+    assert response.is_complete is True
+    assert len(response.tool_calls) == 1
+
+
+def test_solver_final_rejects_a_response_without_any_final_answer() -> None:
+    with pytest.raises(ProtocolError) as excinfo:
+        validate_solver_final("```python\nprint(32.54)\n```")
+
+    assert "final answer" in str(excinfo.value)
+
+
 def test_observation_matches_upstream_runtime_wrapper() -> None:
     observation = format_code_execution_observation(
         [{"status": "success", "run_result": {"stdout": "4\n", "stderr": ""}}]

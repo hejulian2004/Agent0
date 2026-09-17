@@ -30,18 +30,22 @@ Three rules are load bearing:
    ``independently_verified=false``.  ``step_validated`` stays empty because no
    independent step validator exists in Phase 2B-P0 (Verifier is deferred).
 
-Protocol scaffolding
---------------------
+Protocol authority
+------------------
 
-The Mulberry and ReTool prompts ask for ``### The final answer is:`` and
-``<answer>\\boxed{...}</answer>`` respectively; neither mentions ``<think>``,
-``CONFIDENCE:`` or ``FINAL_ANSWER:``.  The frozen export gate
-(:func:`~.protocol.validate_solver_final`) requires all three.  The rollout
-therefore folds a protocol scaffold into the first *user* message, which is the
-same technique the legacy builder used for its smoke rows.  The source question
-is embedded verbatim so image placeholders keep their exact count and order,
-and no ``system`` role is introduced because the frozen Validator only accepts
-``user``/``assistant``.
+The Solver protocol is taken from the upstream runtime, not invented here.
+``agent0_evaluator._build_prompt`` builds ``[system, user]`` where the system
+prompt asks for fenced Python blocks and a final answer in ``\boxed{...}``, and
+its own comment states it is aligned with the training system prompt
+``scripts/prompt.txt``.  There is no ``<think>``, ``CONFIDENCE:`` or
+``FINAL_ANSWER:`` in that contract.
+
+The rollout therefore sends :data:`SOLVER_SYSTEM_PROMPT` as a *system* message
+on the Teacher request, and the exported row carries only the source question
+plus the natural assistant/observation turns.  The source question is embedded
+verbatim so image placeholders keep their exact count and order, and no
+``system`` role reaches the row because the frozen Validator only accepts
+``user``/``assistant``; training re-supplies the system prompt via ``--system``.
 """
 
 from __future__ import annotations
@@ -56,6 +60,7 @@ from .answer_check import (
     extract_final_answer,
 )
 from .budget import BudgetStats, RequestResult, TeacherRequestBudget
+from .canonical import sha256_json
 from .fake_builder import SourceTask
 from .protocol import (
     ProtocolError,
@@ -91,31 +96,42 @@ FAILURE_TEACHER_PREFIX = "teacher_"
 # claiming that the sandbox validated each step.
 STEP_VALIDATION_NOTE = "not_performed_phase2b_p0"
 
-SOLVER_PROMPT_SCAFFOLD = (
-    "## Task protocol\n"
-    "Solve the problem step by step.\n"
-    "- Wrap each reasoning step in <think>...</think> tags.\n"
-    "- If you need a computation, write Python in a fenced block:\n"
-    "  ```python\n"
-    "  # your code\n"
-    "  ```\n"
-    "  The code runs in an external sandbox and its output is returned to you "
-    "as a [Code Execution Result] message. Do not emit JSON tool calls.\n"
-    "- When you are finished, end your response with exactly these two lines:\n"
-    "  CONFIDENCE: <a number between 0 and 1>\n"
-    "  FINAL_ANSWER: <your final answer on one line>\n"
+# The source Solver protocol, copied verbatim from the upstream runtime's own
+# default (``agent0_evaluator._build_prompt``), which states in its comment that
+# it is aligned with the training system prompt ``scripts/prompt.txt``:
+# reason step by step, optionally run Python in fenced code blocks executed by a
+# sandbox, and give the final answer in ``\boxed{...}``.
+#
+# It is a *system* message on the Teacher request only.  It is never written into
+# the exported row: training injects the same instruction through
+# ``swift sft --system scripts/prompt.txt``, and the frozen Validator only
+# accepts ``user``/``assistant`` roles.
+#
+# ``test_trajectory_builder`` asserts this constant still matches the upstream
+# source, so it cannot silently drift.
+SOLVER_SYSTEM_PROMPT = (
+    "You are a vision-language reasoning agent. Solve the problem step "
+    "by step. You may optionally write Python code to manipulate the "
+    "image (crop, resize, adjust contrast) or to perform calculations "
+    "that support your reasoning.\n\n"
+    "- Wrap every Python snippet in a fenced block:\n"
+    "  ```python\n  # your code\n  ```\n"
+    "  The code runs in a sandbox and its output is returned to you.\n"
+    "- When you are finished, put the final answer inside \\boxed{...}."
 )
 
-def build_solver_user_content(question: str) -> str:
-    """Fold the protocol scaffold into the first user message.
 
-    The source question is embedded verbatim, so the number and order of
-    ``<image>`` placeholders is preserved exactly.
+def build_solver_user_content(question: str) -> str:
+    """Return the exported user turn: the source question, verbatim.
+
+    The source question is embedded unchanged so the number and order of
+    ``<image>`` placeholders is preserved exactly.  No local protocol scaffold
+    is folded in; the Solver protocol travels as a system message instead.
     """
 
     if not isinstance(question, str) or not question.strip():
         raise ValueError("question must be a non-empty string")
-    return f"{SOLVER_PROMPT_SCAFFOLD}\n{question}"
+    return question
 
 
 def _response_text(value: Any) -> str:
@@ -222,6 +238,7 @@ class RealTrajectoryBuilder:
         max_rollout_turns: int | None = None,
         budget_limit: int = DEFAULT_BUDGET_LIMIT,
         sampling: Any | None = None,
+        solver_system_prompt: str | None = SOLVER_SYSTEM_PROMPT,
     ):
         if max_reasoning_steps <= 0:
             raise ValueError("max_reasoning_steps must be positive")
@@ -241,6 +258,7 @@ class RealTrajectoryBuilder:
         self.max_rollout_turns = max_rollout_turns or max_reasoning_steps
         self.budget_limit = budget_limit
         self.sampling = sampling
+        self.solver_system_prompt = solver_system_prompt
 
     def describe(self) -> dict[str, Any]:
         """Non-secret provenance for the run manifest."""
@@ -248,7 +266,16 @@ class RealTrajectoryBuilder:
         return {
             "builder_version": BUILDER_VERSION,
             "solver_prompt_version": SOLVER_PROMPT_VERSION,
-            "solver_prompt_has_system_role": False,
+            # The Solver protocol travels as a system message on the Teacher
+            # request and is deliberately absent from the exported rows, which
+            # training re-supplies through ``--system scripts/prompt.txt``.
+            "solver_system_prompt_role": "system",
+            "solver_system_prompt_exported": False,
+            "solver_system_prompt_sha256": (
+                sha256_json(self.solver_system_prompt)
+                if self.solver_system_prompt
+                else None
+            ),
             "max_rollout_turns": self.max_rollout_turns,
             "max_reasoning_steps": self.max_reasoning_steps,
             "budget_limit_per_task": self.budget_limit,
@@ -269,14 +296,25 @@ class RealTrajectoryBuilder:
         role: str,
         messages: list[dict[str, Any]],
     ) -> RequestResult:
-        """Consume one budget slot for exactly one Teacher attempt."""
+        """Consume one budget slot for exactly one Teacher attempt.
 
+        The Solver system prompt is prepended here, on the request only.  It is
+        never appended to ``messages``, so the exported row keeps exactly the
+        ``user``/``assistant`` turns the frozen Validator accepts and training
+        re-supplies the same instruction through ``--system``.
+        """
+
+        request_messages = list(messages)
+        if self.solver_system_prompt:
+            request_messages.insert(
+                0, {"role": "system", "content": self.solver_system_prompt}
+            )
         return budget.execute(
             role=role,
             backend=self.backend.generate_from_payload,
             payload={
                 "role": role,
-                "messages": list(messages),
+                "messages": request_messages,
                 "images": list(task.images),
                 "sampling": self.sampling,
             },

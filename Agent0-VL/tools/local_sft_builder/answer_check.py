@@ -89,9 +89,12 @@ def extract_final_answer(text: str) -> str | None:
 
     ``FINAL_ANSWER:`` is preferred, with ``\\boxed{...}`` as the fallback,
     matching ``agent0_evaluator._extract_answer``.  The marker match is
-    case-insensitive for the same reason: the upstream evaluator and the frozen
-    ``protocol.FINAL_ANSWER_RE`` are both ``re.IGNORECASE``, so a case-sensitive
-    match here would reject responses the source runtime accepts.
+    case-insensitive for the same reason: the upstream evaluator matches with
+    ``re.IGNORECASE``, so a case-sensitive match here would reject responses the
+    source runtime accepts.
+
+    This is the single source of truth for "what is the final answer":
+    ``protocol.parse_solver_response`` and the export gate both defer to it.
     """
 
     if not isinstance(text, str) or not text:
