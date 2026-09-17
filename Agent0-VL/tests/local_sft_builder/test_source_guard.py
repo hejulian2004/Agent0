@@ -32,12 +32,20 @@ def test_source_guard_fails_closed_on_unknown_split() -> None:
 
 
 def test_source_guard_fails_closed_on_missing_source_revision() -> None:
-    for revision in (None, "   "):
+    for revision in (None, "   ", "unknown", " Unknown "):
         decision = SourceLeakageGuard().check(
             _row(source_revision=revision), expected_stage="sft_stage1"
         )
         assert decision.status == "review_required"
         assert any("source_revision" in reason for reason in decision.reasons)
+
+
+def test_source_guard_does_not_substitute_source_record_id_for_original_id() -> None:
+    row = _row()
+    row.pop("original_id")
+    decision = SourceLeakageGuard().check(row, expected_stage="sft_stage1")
+    assert decision.status == "review_required"
+    assert "original_id" in decision.reasons[0]
 
 
 def test_source_guard_fails_closed_on_incomplete_or_noncanonical_image_hashes() -> None:
@@ -46,7 +54,9 @@ def test_source_guard_fails_closed_on_incomplete_or_noncanonical_image_hashes() 
         {"images": ["image.png"], "image_content_hashes": [None]},
         {"images": ["image.png"], "image_content_hashes": ["A" * 64]},
         {"images": ["image.png"], "image_content_hashes": ["a" * 63]},
+        {"image_content_hashes": None},
         {"source_content_hash": "A" * 64},
+        {"source_content_hash": ""},
     )
     for overrides in cases:
         decision = SourceLeakageGuard().check(

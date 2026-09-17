@@ -18,6 +18,7 @@ from .source_guard import SourceGuardDecision, SourceIdentity, SourceLeakageGuar
 class SourceTask:
     task_id: str
     source_record_id: str
+    original_id: str
     source_dataset: str
     stage: str
     question: str
@@ -29,6 +30,10 @@ class SourceTask:
     source_revision: str = "fixture-v1"
 
     def __post_init__(self) -> None:
+        for field_name in ("task_id", "source_record_id", "original_id", "source_dataset"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} must be a non-empty string")
         if len(self.images) != len(self.image_refs):
             raise ValueError(
                 "images and image_refs must contain the same number of items"
@@ -49,7 +54,7 @@ class SourceTask:
         return {
             "task_id": self.task_id,
             "source_record_id": self.source_record_id,
-            "original_id": self.source_record_id,
+            "original_id": self.original_id,
             "source_dataset": self.source_dataset,
             "source_revision": self.source_revision,
             "question": self.question,

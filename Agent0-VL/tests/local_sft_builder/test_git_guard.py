@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from tools.local_sft_builder.git_guard import (
+    ALLOWED_EXACT_PATHS,
     UpstreamImmutabilityError,
     assert_upstream_immutable,
 )
@@ -44,3 +45,7 @@ def test_upstream_modification_is_rejected(monkeypatch: pytest.MonkeyPatch) -> N
     )
     with pytest.raises(UpstreamImmutabilityError):
         assert_upstream_immutable(REPO_ROOT, "base")
+
+
+def test_only_root_agents_file_is_an_exact_exception() -> None:
+    assert ALLOWED_EXACT_PATHS == {"AGENTS.md"}

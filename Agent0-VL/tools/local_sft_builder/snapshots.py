@@ -47,16 +47,22 @@ def _logical_asset(value: Any) -> dict[str, str]:
             "image reference must be a mapping with asset_id and content_sha256"
         )
 
-    asset_id = value.get("asset_id") or value.get("logical_asset_id")
+    asset_id = (
+        value["asset_id"]
+        if "asset_id" in value
+        else value.get("logical_asset_id")
+    )
     content_hash = value.get("content_sha256")
 
-    if not asset_id or not isinstance(asset_id, str):
+    if not isinstance(asset_id, str) or not normalize_text(asset_id).strip():
         raise ValueError("image reference requires a logical asset_id")
-    asset_id = normalize_text(asset_id).replace("\\", "/")
+    asset_id = normalize_text(asset_id).strip().replace("\\", "/")
     # Absolute paths would make the snapshot platform-specific. Callers must
     # provide a logical ID such as ``dataset/item-7/image-0`` instead.
-    if asset_id.startswith("/") or re.match(r"^[A-Za-z]:/", asset_id):
+    if asset_id.startswith("/") or re.match(r"^[A-Za-z]:", asset_id):
         raise ValueError("absolute image paths are not valid snapshot asset IDs")
+    if ".." in asset_id.split("/"):
+        raise ValueError("parent traversal is not valid in snapshot asset IDs")
     if not isinstance(content_hash, str) or not _HASH_RE.fullmatch(content_hash):
         raise ValueError("content_sha256 must be a lowercase SHA256 hex digest")
     return {"asset_id": asset_id, "content_sha256": content_hash}

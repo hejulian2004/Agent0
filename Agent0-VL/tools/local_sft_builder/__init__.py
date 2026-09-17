@@ -24,6 +24,17 @@ from .projector import Projector
 from .snapshots import ImmutableSnapshot
 from .validator import validate_supervision_unit, validate_trajectory_for_export
 from .pipeline import PipelineResult, export_pipeline_result, validate_project_deduplicate
+from .source_adapter import (
+    DuplicateSourceIdentityError,
+    ForbiddenIndexError,
+    ForbiddenSourceIndex,
+    InvalidImageRootError,
+    RealSourceAdapter,
+    SourceInputError,
+    SourcePreflightEntry,
+    SourcePreflightError,
+    SourcePreflightResult,
+)
 
 __all__ = [
     "AuditRecord",
@@ -46,4 +57,13 @@ __all__ = [
     "PipelineResult",
     "export_pipeline_result",
     "validate_project_deduplicate",
+    "DuplicateSourceIdentityError",
+    "ForbiddenIndexError",
+    "ForbiddenSourceIndex",
+    "InvalidImageRootError",
+    "RealSourceAdapter",
+    "SourceInputError",
+    "SourcePreflightEntry",
+    "SourcePreflightError",
+    "SourcePreflightResult",
 ]

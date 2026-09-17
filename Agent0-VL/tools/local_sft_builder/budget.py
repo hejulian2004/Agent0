@@ -98,7 +98,8 @@ class TeacherRequestBudget:
         return connection
 
     def _initialize(self) -> None:
-        with self._connect() as connection:
+        connection = self._connect()
+        try:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute(
                 """
@@ -126,6 +127,9 @@ class TeacherRequestBudget:
                 "CREATE INDEX IF NOT EXISTS idx_teacher_requests_task "
                 "ON teacher_requests(task_id)"
             )
+            connection.commit()
+        finally:
+            connection.close()
 
     def reserve_request(
         self,

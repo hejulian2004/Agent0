@@ -51,13 +51,17 @@ def _declared_image_count(record: Mapping[str, Any]) -> int | None:
 
 def _image_hashes(record: Mapping[str, Any]) -> tuple[str, ...]:
     raw_hashes: Any = None
+    found = False
     for field_name in ("image_content_hashes", "image_sha256", "image_hashes"):
         if field_name in record:
             raw_hashes = record[field_name]
+            found = True
             break
 
-    if raw_hashes is None:
+    if not found:
         return ()
+    if raw_hashes is None:
+        raise ValueError("image content hashes must not be null")
     if not isinstance(raw_hashes, (list, tuple)):
         raise ValueError("image content hashes must be a list or tuple")
     return tuple(
@@ -77,18 +81,22 @@ class SourceIdentity:
 
     @classmethod
     def from_record(cls, record: Mapping[str, Any]) -> "SourceIdentity":
-        task_id = record.get("task_id") or record.get("id") or record.get("sample_id")
-        source_dataset = record.get("source_dataset") or record.get("data_source")
-        source_revision = record.get("source_revision") or record.get("revision")
-        original_id = record.get("original_id") or record.get("source_record_id")
-        if not task_id or not source_dataset or not original_id:
-            raise ValueError(
-                "source identity requires task_id, source_dataset and original_id"
-            )
-        if source_revision is None:
-            raise ValueError("source identity requires source_revision")
-        source_revision_text = normalize_text(str(source_revision)).strip()
-        if not source_revision_text or source_revision_text.lower() == "unknown":
+        identity_fields = (
+            "task_id",
+            "source_dataset",
+            "source_revision",
+            "original_id",
+        )
+        for field_name in identity_fields:
+            value = record.get(field_name)
+            if not isinstance(value, str) or not normalize_text(value).strip():
+                raise ValueError(f"source identity requires {field_name}")
+        task_id = record["task_id"]
+        source_dataset = record["source_dataset"]
+        source_revision = record["source_revision"]
+        original_id = record["original_id"]
+        source_revision_text = normalize_text(source_revision).strip()
+        if source_revision_text.casefold() == "unknown":
             raise ValueError("source identity requires source_revision")
 
         image_hashes = _image_hashes(record)
@@ -98,8 +106,9 @@ class SourceIdentity:
                 "image path/reference count must equal image hash count"
             )
 
-        source_content_hash = record.get("source_content_hash")
-        if not source_content_hash:
+        if "source_content_hash" in record:
+            source_content_hash = record["source_content_hash"]
+        else:
             source_content_hash = sha256_json(
                 {
                     "question": record.get("question") or record.get("prompt") or "",
@@ -160,7 +169,12 @@ class SourceLeakageGuard:
     ) -> SourceGuardDecision:
         split = record.get("split")
         usage_partition = record.get("usage_partition")
-        if split is None or usage_partition is None:
+        if (
+            not isinstance(split, str)
+            or not split.strip()
+            or not isinstance(usage_partition, str)
+            or not usage_partition.strip()
+        ):
             return SourceGuardDecision(
                 "review_required",
                 ("missing_or_unknown_split_metadata",),

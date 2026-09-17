@@ -11,6 +11,7 @@ ALLOWED_ADDITION_PREFIXES = (
     "Agent0-VL/tools/local_sft_builder/",
     "Agent0-VL/tests/local_sft_builder/",
 )
+ALLOWED_EXACT_PATHS = frozenset({"AGENTS.md"})
 
 
 @dataclass(frozen=True)
@@ -60,7 +61,10 @@ def assert_upstream_immutable(
     violations: list[GitChange] = []
     for change in changes:
         is_addition = change.status.startswith("A")
-        allowed = any(change.path.startswith(prefix) for prefix in ALLOWED_ADDITION_PREFIXES)
+        allowed = (
+            change.path in ALLOWED_EXACT_PATHS
+            or any(change.path.startswith(prefix) for prefix in ALLOWED_ADDITION_PREFIXES)
+        )
         if not is_addition or not allowed:
             violations.append(change)
     if violations:

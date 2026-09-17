@@ -23,6 +23,7 @@ def _tasks() -> tuple[SourceTask, ...]:
         SourceTask(
             task_id="task-A",
             source_record_id="source-A",
+            original_id="original-A",
             source_dataset="fixture",
             stage="sft_stage1",
             usage_partition="sft_stage1",
@@ -39,6 +40,7 @@ def _tasks() -> tuple[SourceTask, ...]:
         SourceTask(
             task_id="task-B",
             source_record_id="source-B",
+            original_id="original-B",
             source_dataset="fixture",
             stage="sft_stage2",
             usage_partition="sft_stage2",
@@ -55,6 +57,7 @@ def _tasks() -> tuple[SourceTask, ...]:
         SourceTask(
             task_id="task-C",
             source_record_id="source-C",
+            original_id="original-C",
             source_dataset="fixture",
             stage="sft_stage1",
             usage_partition="sft_stage1",
@@ -173,6 +176,7 @@ def test_invalid_image_hash_stops_before_snapshot_or_generation(tmp_path) -> Non
     task = SourceTask(
         task_id="task-invalid-image",
         source_record_id="source-invalid-image",
+        original_id="original-invalid-image",
         source_dataset="fixture",
         stage="sft_stage1",
         usage_partition="sft_stage1",

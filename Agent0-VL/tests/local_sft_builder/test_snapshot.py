@@ -104,17 +104,22 @@ def test_snapshot_assets_require_hashed_mappings(field_name: str) -> None:
             )
 
 
-def test_snapshot_hash_binds_asset_content_hash() -> None:
+@pytest.mark.parametrize("field_name", ("original_images", "derived_images"))
+def test_snapshot_hash_binds_asset_content_hash(field_name: str) -> None:
     first = ImmutableSnapshot.create(
         messages=[{"role": "user", "content": "Q"}],
-        original_images=[
-            {"asset_id": "dataset/item-1/image-0", "content_sha256": "b" * 64}
-        ],
+        **{
+            field_name: [
+                {"asset_id": "dataset/item-1/image-0", "content_sha256": "b" * 64}
+            ]
+        },
     )
     second = ImmutableSnapshot.create(
         messages=[{"role": "user", "content": "Q"}],
-        original_images=[
-            {"asset_id": "dataset/item-1/image-0", "content_sha256": "c" * 64}
-        ],
+        **{
+            field_name: [
+                {"asset_id": "dataset/item-1/image-0", "content_sha256": "c" * 64}
+            ]
+        },
     )
     assert first.snapshot_hash != second.snapshot_hash
