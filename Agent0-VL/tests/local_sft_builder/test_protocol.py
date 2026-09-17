@@ -11,6 +11,7 @@ from tools.local_sft_builder.protocol import (
     reject_json_tool_call,
     validate_solver_final,
 )
+from tools.local_sft_builder.runtime import SourceRuntimeAdapter
 
 
 def test_source_solver_protocol_extracts_fenced_python_only() -> None:
@@ -18,6 +19,10 @@ def test_source_solver_protocol_extracts_fenced_python_only() -> None:
     assert extract_python_blocks(text) == ("print(2 + 2)\n",)
     with pytest.raises(ProtocolError):
         reject_json_tool_call('{"tool_name":"PythonExec","tool_input":{"code":"print(4)"}}')
+    with pytest.raises(ProtocolError):
+        SourceRuntimeAdapter().extract_tool_calls(
+            '{"tool_name":"PythonExec","tool_input":{"code":"print(4)"}}'
+        )
 
 
 def test_solver_final_and_role_json_parsers() -> None:

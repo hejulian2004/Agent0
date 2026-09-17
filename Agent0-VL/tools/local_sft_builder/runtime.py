@@ -13,6 +13,7 @@ from .protocol import (
     extract_python_blocks,
     format_code_execution_observation,
     observation_message,
+    reject_json_tool_call,
 )
 
 
@@ -86,6 +87,7 @@ class SourceRuntimeAdapter:
         self.sandbox = sandbox or DeterministicPythonSandbox()
 
     def extract_tool_calls(self, solver_text: str) -> tuple[PythonToolCall, ...]:
+        reject_json_tool_call(solver_text)
         return tuple(PythonToolCall("PythonExec", block) for block in extract_python_blocks(solver_text))
 
     def execute_solver_text(
