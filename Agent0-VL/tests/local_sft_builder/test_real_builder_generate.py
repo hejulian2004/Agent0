@@ -8,6 +8,7 @@ dataset, network endpoint or model is touched.
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -52,6 +53,13 @@ EXPECTED_FILES = {
     "stage2.jsonl",
     "final_dedup.jsonl",
 }
+
+# Phase 2B-Lite dropped the ledger-finalization step, so the ledger is no
+# longer converted out of WAL mode and ``teacher_requests.sqlite3`` may or may
+# not be accompanied by ``-wal`` / ``-shm`` sidecars. Whether they survive the
+# process is not an acceptance condition either way (plan 4.B), so the checks
+# below are blind to them instead of pinning an exact file count.
+SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm")
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -207,7 +215,12 @@ def test_generate_writes_the_full_run_directory(tmp_path, monkeypatch) -> None:
         requests = list(teacher.requests)
 
     assert exit_code == 0
-    assert {path.name for path in output_dir.iterdir()} == EXPECTED_FILES
+    produced_names = {
+        path.name
+        for path in output_dir.iterdir()
+        if not path.name.endswith(SQLITE_SIDECAR_SUFFIXES)
+    }
+    assert produced_names == EXPECTED_FILES
 
     # --- the exported row -------------------------------------------------
     rows = _jsonl(output_dir / "final_dedup.jsonl")
@@ -318,6 +331,22 @@ def test_generate_writes_the_full_run_directory(tmp_path, monkeypatch) -> None:
         "parse_failed": 0,
         "other_failed": 0,
     }
+
+    # Phase 2B-Lite lowest guarantee: once ``--generate`` has returned, the
+    # ledger must still be re-openable and must report the same request count
+    # the manifest published. It may well still be in WAL mode -- that is
+    # accepted, and the sidecars are deliberately not asserted on. Note the
+    # explicit ``close()``: ``with sqlite3.connect(...)`` only ends the
+    # transaction and never closes the handle.
+    ledger = sqlite3.connect(str(output_dir / "teacher_requests.sqlite3"))
+    try:
+        recorded_requests = ledger.execute(
+            "SELECT COUNT(*) FROM teacher_requests"
+        ).fetchone()[0]
+    finally:
+        ledger.close()
+    assert recorded_requests == manifest["teacher_request_counts"]["consumed_slot"]
+
     assert manifest["teacher"]["teacher_credential_configured"] is True
     assert manifest["teacher"]["teacher_credential_env"] == CREDENTIAL_ENV
     # The manifest guard rejects "token", so the limit is renamed.

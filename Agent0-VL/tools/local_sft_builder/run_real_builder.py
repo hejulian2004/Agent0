@@ -19,10 +19,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sqlite3
 import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -149,41 +147,6 @@ def _write_jsonl(path: Path, values: Sequence[Mapping[str, Any]]) -> None:
                 )
                 + "\n"
             )
-
-
-def _finalize_ledger(db_path: Path, *, attempts: int = 5) -> None:
-    """Leave the ledger as one portable SQLite file.
-
-    Switching out of WAL needs an exclusive lock, and on Windows any open
-    handle to the ``-wal``/``-shm`` files blocks it. ``TeacherRequestBudget``
-    closes every connection it opens, so a failure here means some other
-    handle is still alive -- retry briefly, then fail loudly rather than
-    silently shipping a multi-file ledger.
-    """
-
-    last_error: sqlite3.OperationalError | None = None
-    for attempt in range(1, attempts + 1):
-        # ``isolation_level=None`` keeps the connection in autocommit mode:
-        # ``PRAGMA journal_mode`` cannot run inside an open transaction.
-        connection = sqlite3.connect(
-            str(db_path), timeout=30.0, isolation_level=None
-        )
-        try:
-            connection.execute("PRAGMA busy_timeout = 30000")
-            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            connection.execute("PRAGMA journal_mode = DELETE")
-        except sqlite3.OperationalError as exc:
-            last_error = exc
-        else:
-            return
-        finally:
-            connection.close()
-        time.sleep(0.2 * attempt)
-
-    raise RuntimeError(
-        f"could not finalize the Teacher ledger at {db_path} after {attempts} "
-        f"attempts; it is still in WAL mode: {last_error}"
-    )
 
 
 def _candidate_to_dict(candidate: ExportCandidate) -> dict[str, Any]:
@@ -354,7 +317,6 @@ def _run_dry_run(args: argparse.Namespace) -> dict[str, object]:
         "__phase2a_preflight__",
         limit=32,
     )
-    _finalize_ledger(ledger_path)
 
     summary: dict[str, object] = {
         "status": "preflight_complete",
@@ -497,8 +459,6 @@ def _run_generate(args: argparse.Namespace) -> dict[str, object]:
         [row.to_dict() for row in rows_before_dedup if row.stage == "sft_stage2"],
     )
     write_export_jsonl(rows_after_dedup, output_dir / "final_dedup.jsonl")
-
-    _finalize_ledger(ledger_path)
 
     manifest = build_phase2b_manifest(
         run_id=output_dir.name,

@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable
 
 
 TERMINAL_STATUSES = frozenset(
@@ -97,29 +96,6 @@ class TeacherRequestBudget:
         connection.execute("PRAGMA busy_timeout = 30000")
         connection.row_factory = sqlite3.Row
         return connection
-
-    @contextmanager
-    def _connection(self) -> Iterator[sqlite3.Connection]:
-        """Yield a connection that is committed/rolled back *and closed*.
-
-        ``with sqlite3.connect(...) as connection:`` only ends the transaction
-        -- ``Connection.__exit__`` never closes the handle. Because
-        ``sqlite3.Connection`` sits in a reference cycle, the handle then
-        survives until the cyclic collector happens to run, so a long run
-        accumulates open handles. On Windows an open handle keeps the
-        ``-wal``/``-shm`` files mapped, which makes the run-end
-        ``journal_mode = DELETE`` fail with ``database is locked``.
-
-        Always use this helper rather than ``with self._connect() as ...`` so
-        the handle is released deterministically by refcounting.
-        """
-
-        connection = self._connect()
-        try:
-            with connection:
-                yield connection
-        finally:
-            connection.close()
 
     def _initialize(self) -> None:
         connection = self._connect()
@@ -229,7 +205,7 @@ class TeacherRequestBudget:
     def mark_backend_started(self, request_id: str) -> None:
         """Record that execution crossed the backend call boundary."""
 
-        with self._connection() as connection:
+        with self._connect() as connection:
             cursor = connection.execute(
                 "UPDATE teacher_requests SET backend_called = 1, "
                 "backend_submission_known = 1 "
@@ -255,7 +231,7 @@ class TeacherRequestBudget:
         known_value = (
             None if backend_submission_known is None else int(backend_submission_known)
         )
-        with self._connection() as connection:
+        with self._connect() as connection:
             cursor = connection.execute(
                 """
                 UPDATE teacher_requests
@@ -281,7 +257,7 @@ class TeacherRequestBudget:
     def recover_stale_pending(self) -> int:
         """Conservatively finalize every pending request for this task."""
 
-        with self._connection() as connection:
+        with self._connect() as connection:
             cursor = connection.execute(
                 """
                 UPDATE teacher_requests
@@ -296,7 +272,7 @@ class TeacherRequestBudget:
             return cursor.rowcount
 
     def stats(self) -> BudgetStats:
-        with self._connection() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 "SELECT status, COUNT(*) AS count FROM teacher_requests "
                 "WHERE task_id = ? GROUP BY status",
@@ -317,7 +293,7 @@ class TeacherRequestBudget:
         return stats
 
     def request_rows(self) -> list[dict[str, Any]]:
-        with self._connection() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM teacher_requests WHERE task_id = ? "
                 "ORDER BY request_seq",
