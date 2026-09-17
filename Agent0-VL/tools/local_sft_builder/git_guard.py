@@ -13,20 +13,6 @@ ALLOWED_ADDITION_PREFIXES = (
 )
 ALLOWED_EXACT_PATHS = frozenset({"AGENTS.md"})
 
-# The single deliberate exception to "additions only".
-#
-# The repo-root .gitignore is build configuration, not upstream source: it
-# cannot change what the frozen Agent0-VL code does. It is listed here so that
-# the builder's own workspace directory (``.workbuddy-ai/``, which holds local
-# agent memory) can be ignored -- otherwise ``git add -A`` drags that local
-# state into a commit and trips this very guard.
-#
-# The exception is intentionally narrower than the addition allowlist: only a
-# *modification* of exactly these paths is tolerated. Deletions, renames and
-# every other upstream modification still fail, and no other file may be
-# touched at all.
-ALLOWED_MODIFICATION_PATHS = frozenset({".gitignore"})
-
 
 @dataclass(frozen=True)
 class GitChange:
@@ -74,14 +60,12 @@ def assert_upstream_immutable(
     changes = changed_paths(repo_root, base_sha, head_sha)
     violations: list[GitChange] = []
     for change in changes:
-        allowed_addition = change.status.startswith("A") and (
+        is_addition = change.status.startswith("A")
+        allowed = (
             change.path in ALLOWED_EXACT_PATHS
             or any(change.path.startswith(prefix) for prefix in ALLOWED_ADDITION_PREFIXES)
         )
-        allowed_modification = (
-            change.status == "M" and change.path in ALLOWED_MODIFICATION_PATHS
-        )
-        if not (allowed_addition or allowed_modification):
+        if not is_addition or not allowed:
             violations.append(change)
     if violations:
         rendered = ", ".join(f"{item.status}:{item.path}" for item in violations)
