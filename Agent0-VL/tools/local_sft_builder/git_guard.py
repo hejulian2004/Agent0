@@ -26,7 +26,7 @@ class UpstreamImmutabilityError(RuntimeError):
 
 def _git(repo_root: Path, *args: str) -> str:
     completed = subprocess.run(
-        ["git", *args],
+        ["git", "-c", f"safe.directory={repo_root}", *args],
         cwd=repo_root,
         check=True,
         capture_output=True,
