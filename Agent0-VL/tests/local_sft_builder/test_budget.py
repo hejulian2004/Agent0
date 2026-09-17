@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import sqlite3
 
 import pytest
@@ -8,6 +9,10 @@ from tools.local_sft_builder.budget import (
     TeacherBudgetExceeded,
     TeacherRequestBudget,
 )
+
+
+def _live_connections() -> int:
+    return sum(1 for obj in gc.get_objects() if isinstance(obj, sqlite3.Connection))
 
 
 def test_33rd_teacher_request_is_never_submitted(tmp_path) -> None:
@@ -91,3 +96,44 @@ def test_retry_is_a_new_consumed_slot(tmp_path) -> None:
     assert rows[1]["retry_of_request_id"] == first.request_id
     assert rows[1]["retry_index"] == 1
     assert budget.stats().consumed_slot == 2
+
+
+def test_budget_releases_every_sqlite_connection(tmp_path) -> None:
+    """Regression: ``with self._connect() as c`` does not close ``c``.
+
+    ``sqlite3.Connection.__exit__`` only ends the open transaction. Since the
+    object sits in a reference cycle it is reclaimed solely by the cyclic
+    collector, so a long run accumulates open handles. On Windows those
+    handles keep the ``-wal``/``-shm`` files mapped and the run-end
+    ``journal_mode = DELETE`` fails with ``database is locked`` -- which is
+    exactly how this surfaced in the end-to-end ``--generate`` test.
+    """
+
+    db_path = tmp_path / "requests.sqlite3"
+    budget = TeacherRequestBudget(db_path, "task-leak", limit=8)
+
+    gc.collect()
+    baseline = _live_connections()
+
+    for _ in range(3):
+        budget.execute("solver", lambda _: "ok", {})
+    budget.stats()
+    budget.request_rows()
+    budget.recover_stale_pending()
+    budget.assert_consistent(require_no_pending=True)
+
+    # Deliberately no ``gc.collect()`` here: a deterministically closed
+    # connection is released by refcounting alone, without the cyclic
+    # collector's help.
+    assert _live_connections() == baseline
+
+    # The ledger must also be switchable out of WAL without the exclusive-lock
+    # failure that the leaked handles caused.
+    connection = sqlite3.connect(str(db_path), timeout=5.0, isolation_level=None)
+    try:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        assert connection.execute("PRAGMA journal_mode = DELETE").fetchone()[0] == (
+            "delete"
+        )
+    finally:
+        connection.close()

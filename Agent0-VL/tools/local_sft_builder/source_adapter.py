@@ -572,6 +572,7 @@ class RealSourceAdapter:
 
         physical_images: list[str] = []
         actual_hashes: list[str] = []
+        relative_images: list[str] = []
         for index, image in enumerate(images):
             physical_path, actual_hash = self._resolve_image(image, index)
             declared_hash = image_hashes[index]
@@ -579,6 +580,12 @@ class RealSourceAdapter:
                 raise _RowReviewRequired(f"image_hash_mismatch:{index}")
             physical_images.append(physical_path)
             actual_hashes.append(actual_hash)
+            # ``_resolve_image`` already validated and normalized this value;
+            # keep the portable form so the exported row stays image-root
+            # relative instead of leaking a machine path.
+            relative_images.append(
+                normalize_text(str(image)).strip().replace("\\", "/")
+            )
 
         if question.count("<image>") != len(images):
             raise _RowReviewRequired("image_placeholder_count_mismatch")
@@ -622,6 +629,7 @@ class RealSourceAdapter:
             question=question,
             images=tuple(physical_images),
             image_refs=refs,
+            image_relatives=tuple(relative_images),
             ground_truth=ground_truth,
             split=split,
             usage_partition=usage_partition,

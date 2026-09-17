@@ -18,10 +18,20 @@ from .schema import (
     ValidationDecision,
     migrate_v1_to_v2,
 )
+from .answer_check import (
+    ANSWER_CHECK_METHOD,
+    EVIDENCE_SOURCE,
+    check_reference_answer,
+    extract_final_answer,
+    normalize_answer,
+)
 from .budget import TeacherBudgetExceeded, TeacherRequestBudget
 from .dedup import exact_dedup_key, exact_deduplicate
 from .projector import Projector
+from .snapshot_store import SnapshotStore, SnapshotStoreError
 from .snapshots import ImmutableSnapshot
+from .teacher_backend import SamplingConfig, TeacherBackend, TeacherResponse
+from .trajectory_builder import RealTrajectoryBuilder, RolloutOutcome
 from .validator import validate_supervision_unit, validate_trajectory_for_export
 from .pipeline import PipelineResult, export_pipeline_result, validate_project_deduplicate
 from .source_adapter import (
@@ -46,12 +56,24 @@ __all__ = [
     "TrajectoryRecord",
     "ValidationDecision",
     "migrate_v1_to_v2",
+    "ANSWER_CHECK_METHOD",
+    "EVIDENCE_SOURCE",
+    "check_reference_answer",
+    "extract_final_answer",
+    "normalize_answer",
     "TeacherBudgetExceeded",
     "TeacherRequestBudget",
     "exact_dedup_key",
     "exact_deduplicate",
     "Projector",
+    "SnapshotStore",
+    "SnapshotStoreError",
     "ImmutableSnapshot",
+    "SamplingConfig",
+    "TeacherBackend",
+    "TeacherResponse",
+    "RealTrajectoryBuilder",
+    "RolloutOutcome",
     "validate_supervision_unit",
     "validate_trajectory_for_export",
     "PipelineResult",

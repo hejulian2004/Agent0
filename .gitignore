@@ -91,3 +91,8 @@ htmlcov/
 .tox/
 .mypy_cache/
 .pyre/
+
+# ---------------------
+# WorkBuddy AI workspace state (memory, plans, local agent data)
+# ---------------------
+.workbuddy-ai/

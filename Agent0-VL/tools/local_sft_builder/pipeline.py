@@ -23,11 +23,15 @@ class PipelineResult:
 def validate_project_deduplicate(
     trajectories: Iterable[TrajectoryRecord],
     source_decisions: Mapping[str, SourceGuardDecision],
+    *,
+    max_reasoning_steps: int = 8,
 ) -> PipelineResult:
     """Apply Validator policy before Projector and exact dedup.
 
     The Projector receives only candidates created by Validator; it never
     receives raw trajectories and therefore cannot reimplement quality policy.
+    ``max_reasoning_steps`` is threaded through so the export gate agrees with
+    the configured rollout limit instead of silently using the default.
     """
 
     candidates = []
@@ -36,6 +40,7 @@ def validate_project_deduplicate(
         decision, candidate = validate_trajectory_for_export(
             trajectory,
             source_guard=source_decisions.get(trajectory.task_id),
+            max_reasoning_steps=max_reasoning_steps,
         )
         decisions.append(decision)
         if candidate is not None:

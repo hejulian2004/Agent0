@@ -24,6 +24,11 @@ class SourceTask:
     question: str
     images: tuple[str, ...] = ()
     image_refs: tuple[dict[str, str], ...] = ()
+    # Portable, image-root-relative image paths for the exported SFT row.
+    # ``images`` holds the *physical* paths the runtime and the Teacher need, so
+    # the relative form has to be carried separately.  Fixtures may leave this
+    # empty and fall back to ``images`` (their paths are already relative).
+    image_relatives: tuple[str, ...] = ()
     ground_truth: str = ""
     split: str = "train"
     usage_partition: str | None = None
@@ -38,6 +43,10 @@ class SourceTask:
             raise ValueError(
                 "images and image_refs must contain the same number of items"
             )
+        if self.image_relatives and len(self.image_relatives) != len(self.images):
+            raise ValueError(
+                "image_relatives must be empty or match the image count"
+            )
         for index, image_ref in enumerate(self.image_refs):
             if "content_sha256" not in image_ref:
                 raise ValueError(
@@ -49,6 +58,16 @@ class SourceTask:
         """Return ordered image hashes from the canonical image references."""
 
         return tuple(ref["content_sha256"] for ref in self.image_refs)
+
+    @property
+    def export_images(self) -> tuple[str, ...]:
+        """Image paths written into the final SFT row.
+
+        These are relative to the configured ``image_root`` so the dataset stays
+        portable; the physical paths stay in ``images``.
+        """
+
+        return self.image_relatives or self.images
 
     def as_source_record(self) -> dict[str, Any]:
         return {
