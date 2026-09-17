@@ -167,3 +167,34 @@ def test_fake_e2e_a_b_c_preserves_lineage_boundary_and_projection(tmp_path) -> N
     for result in results:
         assert result.budget_stats.pending == 0
         assert result.budget_stats.consumed_slot <= 32
+
+
+def test_invalid_image_hash_stops_before_snapshot_or_generation(tmp_path) -> None:
+    task = SourceTask(
+        task_id="task-invalid-image",
+        source_record_id="source-invalid-image",
+        source_dataset="fixture",
+        stage="sft_stage1",
+        usage_partition="sft_stage1",
+        question="<image>\nThis image hash is invalid.",
+        images=("fixture/invalid/image-0.png",),
+        image_refs=(
+            {
+                "asset_id": "fixture/invalid/image-0",
+                "content_sha256": None,
+            },
+        ),
+    )
+    builder = FakeTrajectoryBuilder(
+        backend=ScriptedBackend({}),
+        budget_db=str(tmp_path / "invalid-image.sqlite3"),
+        base_sha=BASE_SHA,
+    )
+
+    result = builder.build_task(task)
+
+    assert result.source_guard.status == "review_required"
+    assert result.root_snapshot is None
+    assert result.trajectories == ()
+    assert len(result.audit_records) == 1
+    assert result.budget_stats.consumed_slot == 0

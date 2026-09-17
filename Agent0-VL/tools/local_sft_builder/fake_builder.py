@@ -63,7 +63,7 @@ class SourceTask:
 @dataclass(frozen=True)
 class FakeBuildResult:
     task: SourceTask
-    root_snapshot: ImmutableSnapshot
+    root_snapshot: ImmutableSnapshot | None
     trajectories: tuple[TrajectoryRecord, ...]
     audit_records: tuple[AuditRecord, ...]
     candidates: tuple[Any, ...]
@@ -197,7 +197,6 @@ class FakeTrajectoryBuilder:
             task.as_source_record(), expected_stage=task.stage
         )
         budget = TeacherRequestBudget(self.budget_db, task.task_id, limit=32)
-        root = self._root_snapshot(task)
         if not source_decision.accepted:
             audit = self._audit_record(
                 task,
@@ -207,13 +206,14 @@ class FakeTrajectoryBuilder:
             )
             return FakeBuildResult(
                 task,
-                root,
+                None,
                 (),
                 (audit,),
                 (),
                 source_decision,
                 budget.assert_consistent(require_no_pending=True),
             )
+        root = self._root_snapshot(task)
 
         analysis_result = self._analysis(budget, task)
         if analysis_result is None:
