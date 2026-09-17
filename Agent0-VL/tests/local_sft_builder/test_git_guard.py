@@ -39,7 +39,13 @@ def test_current_dev_commit_passes_additive_allowlist() -> None:
     base_sha = _git("rev-parse", "main")
     changes = assert_upstream_immutable(REPO_ROOT, base_sha)
     assert changes
-    assert all(change.status == "A" for change in changes)
+    # Every change is an allowlisted addition, except the single tolerated
+    # modification of the repo-root .gitignore.
+    for change in changes:
+        if change.path == ".gitignore":
+            assert change.status == "M", change
+        else:
+            assert change.status == "A", change
 
 
 def test_upstream_modification_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:

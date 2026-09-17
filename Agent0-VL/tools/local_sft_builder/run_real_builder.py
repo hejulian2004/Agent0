@@ -68,7 +68,10 @@ FORBIDDEN_COVERAGE_NOTE = (
     "split != train or usage_partition outside {sft_stage1, sft_stage2}."
 )
 
-DEFAULT_TEACHER_BASE_URL = "http://127.0.0.1:8000"
+# The Teacher must be an OpenAI-compatible server (``vllm serve``).  Its API
+# root is ``/v1``, and ``TeacherBackend`` appends ``/chat/completions``, so the
+# ``/v1`` here is load-bearing: omitting it produces a 404, not a request.
+DEFAULT_TEACHER_BASE_URL = "http://127.0.0.1:8000/v1"
 DEFAULT_TEACHER_MODEL = "qwen3.8-27b"
 
 

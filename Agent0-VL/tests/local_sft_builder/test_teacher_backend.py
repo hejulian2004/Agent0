@@ -422,3 +422,39 @@ def test_budget_records_successful_response(tmp_path: Path) -> None:
     stats = budget.stats()
     assert stats.successful == 1
     assert stats.pending == 0
+
+
+def test_completions_url_requires_the_openai_api_root() -> None:
+    """The base URL must include ``/v1``.
+
+    A real ``vllm serve`` mounts chat completions at ``/v1/chat/completions``,
+    so a base URL without ``/v1`` yields a 404 rather than a request. The
+    ``--teacher-base-url`` default therefore has to carry it.
+    """
+
+    assert (
+        TeacherBackend(base_url="http://127.0.0.1:8000/v1", model="m").completions_url
+        == "http://127.0.0.1:8000/v1/chat/completions"
+    )
+    # A trailing slash must not double up.
+    assert (
+        TeacherBackend(base_url="http://127.0.0.1:8000/v1/", model="m").completions_url
+        == "http://127.0.0.1:8000/v1/chat/completions"
+    )
+    # Passing the full path is idempotent.
+    assert (
+        TeacherBackend(
+            base_url="http://127.0.0.1:8000/v1/chat/completions", model="m"
+        ).completions_url
+        == "http://127.0.0.1:8000/v1/chat/completions"
+    )
+
+
+def test_teacher_base_url_default_carries_the_v1_root() -> None:
+    from tools.local_sft_builder.run_real_builder import DEFAULT_TEACHER_BASE_URL
+
+    assert DEFAULT_TEACHER_BASE_URL.endswith("/v1")
+    assert (
+        TeacherBackend(base_url=DEFAULT_TEACHER_BASE_URL, model="m").completions_url
+        == f"{DEFAULT_TEACHER_BASE_URL}/chat/completions"
+    )
