@@ -1,0 +1,10 @@
+# Local state and one-off test output are never source artifacts.
+/local_runs/
+/test_artifacts/
+/coverage/
+/.parallel_upload/
+*.sqlite3
+*.log
+.env
+.env.*
+!.env.example
