@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from tools.local_sft_builder.fake_builder import FakeTrajectoryBuilder, SourceTask
+from tools.local_sft_builder.pipeline import export_pipeline_result, validate_project_deduplicate
 from tools.local_sft_builder.projector import Projector
 from tools.local_sft_builder.runtime import ScriptedBackend
 from tools.local_sft_builder.validator import validate_supervision_unit, validate_trajectory_for_export
@@ -124,6 +125,17 @@ def test_fake_e2e_a_b_c_preserves_lineage_boundary_and_projection(tmp_path) -> N
     rows = Projector().project_many([a_candidate, b_candidate])
     assert len(rows) == 2
     assert all(set(row.to_dict()) == {"messages", "images"} for row in rows)
+
+    pipeline = validate_project_deduplicate(
+        [trajectory for result in results for trajectory in result.trajectories],
+        {result.task.task_id: result.source_guard for result in results},
+    )
+    assert len(pipeline.rows_before_dedup) == 2
+    assert len(pipeline.rows_after_dedup) == 2
+    output_path = tmp_path / "final.jsonl"
+    assert export_pipeline_result(pipeline, output_path) == 2
+    serialized = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    assert all(set(row) == {"messages", "images"} for row in serialized)
 
     for result in results:
         assert result.budget_stats.pending == 0
