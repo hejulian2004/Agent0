@@ -2,15 +2,68 @@
 
 from __future__ import annotations
 
-import hashlib
+import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
-from .canonical import canonical_json_bytes, normalize_text, sha256_json
+from .canonical import normalize_text, sha256_json
 
 
 FORBIDDEN_PARTITIONS = frozenset({"test", "validation", "eval", "rl", "reserve"})
 ALLOWED_USAGE = frozenset({"sft_stage1", "sft_stage2"})
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_IMAGE_DECLARATION_FIELDS = ("images", "image_refs")
+
+
+def _require_sha256(value: Any, *, field_name: str) -> str:
+    if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+        raise ValueError(
+            f"{field_name} must be a lowercase SHA256 hex digest"
+        )
+    return value
+
+
+def _declared_image_count(record: Mapping[str, Any]) -> int | None:
+    counts: list[int] = []
+
+    if "image_count" in record:
+        image_count = record["image_count"]
+        if isinstance(image_count, bool) or not isinstance(image_count, int):
+            raise ValueError("image_count must be a non-negative integer")
+        if image_count < 0:
+            raise ValueError("image_count must be a non-negative integer")
+        counts.append(image_count)
+
+    for field_name in _IMAGE_DECLARATION_FIELDS:
+        if field_name not in record:
+            continue
+        values = record[field_name]
+        if not isinstance(values, (list, tuple)):
+            raise ValueError(f"{field_name} must be a list or tuple")
+        counts.append(len(values))
+
+    if not counts:
+        return None
+    if len(set(counts)) != 1:
+        raise ValueError("image declarations have inconsistent cardinality")
+    return counts[0]
+
+
+def _image_hashes(record: Mapping[str, Any]) -> tuple[str, ...]:
+    raw_hashes: Any = None
+    for field_name in ("image_content_hashes", "image_sha256", "image_hashes"):
+        if field_name in record:
+            raw_hashes = record[field_name]
+            break
+
+    if raw_hashes is None:
+        return ()
+    if not isinstance(raw_hashes, (list, tuple)):
+        raise ValueError("image content hashes must be a list or tuple")
+    return tuple(
+        _require_sha256(item, field_name="image_content_hash")
+        for item in raw_hashes
+    )
 
 
 @dataclass(frozen=True)
@@ -26,20 +79,25 @@ class SourceIdentity:
     def from_record(cls, record: Mapping[str, Any]) -> "SourceIdentity":
         task_id = record.get("task_id") or record.get("id") or record.get("sample_id")
         source_dataset = record.get("source_dataset") or record.get("data_source")
-        source_revision = record.get("source_revision") or record.get("revision") or "unknown"
-        original_id = record.get("original_id") or record.get("source_record_id") or task_id
+        source_revision = record.get("source_revision") or record.get("revision")
+        original_id = record.get("original_id") or record.get("source_record_id")
         if not task_id or not source_dataset or not original_id:
-            raise ValueError("source identity requires task_id, source_dataset and original_id")
-
-        image_hashes = tuple(
-            normalize_text(str(item)).lower()
-            for item in (
-                record.get("image_content_hashes")
-                or record.get("image_sha256")
-                or record.get("image_hashes")
-                or []
+            raise ValueError(
+                "source identity requires task_id, source_dataset and original_id"
             )
-        )
+        if source_revision is None:
+            raise ValueError("source identity requires source_revision")
+        source_revision_text = normalize_text(str(source_revision)).strip()
+        if not source_revision_text or source_revision_text.lower() == "unknown":
+            raise ValueError("source identity requires source_revision")
+
+        image_hashes = _image_hashes(record)
+        image_count = _declared_image_count(record)
+        if image_count is not None and image_count != len(image_hashes):
+            raise ValueError(
+                "image path/reference count must equal image hash count"
+            )
+
         source_content_hash = record.get("source_content_hash")
         if not source_content_hash:
             source_content_hash = sha256_json(
@@ -48,12 +106,16 @@ class SourceIdentity:
                     "image_content_hashes": list(image_hashes),
                 }
             )
+        source_content_hash = _require_sha256(
+            source_content_hash,
+            field_name="source_content_hash",
+        )
         return cls(
             task_id=normalize_text(str(task_id)),
             source_dataset=normalize_text(str(source_dataset)),
-            source_revision=normalize_text(str(source_revision)),
+            source_revision=source_revision_text,
             original_id=normalize_text(str(original_id)),
-            source_content_hash=normalize_text(str(source_content_hash)).lower(),
+            source_content_hash=normalize_text(str(source_content_hash)),
             image_content_hashes=image_hashes,
         )
 

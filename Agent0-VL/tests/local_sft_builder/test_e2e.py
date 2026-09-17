@@ -10,6 +10,8 @@ from tools.local_sft_builder.validator import validate_supervision_unit, validat
 
 
 BASE_SHA = "a" * 64
+IMAGE_A_HASH = "b" * 64
+IMAGE_B_HASH = "c" * 64
 
 
 def _final(answer: str) -> str:
@@ -24,7 +26,14 @@ def _tasks() -> tuple[SourceTask, ...]:
             source_dataset="fixture",
             stage="sft_stage1",
             usage_partition="sft_stage1",
-            question="What is 2 + 2?",
+            question="<image>\nWhat is 2 + 2?",
+            images=("fixture/task-A/image-0.png",),
+            image_refs=(
+                {
+                    "asset_id": "fixture/task-A/image-0",
+                    "content_sha256": IMAGE_A_HASH,
+                },
+            ),
             ground_truth="4",
         ),
         SourceTask(
@@ -33,7 +42,14 @@ def _tasks() -> tuple[SourceTask, ...]:
             source_dataset="fixture",
             stage="sft_stage2",
             usage_partition="sft_stage2",
-            question="Use Python to calculate 2 + 2.",
+            question="<image>\nUse Python to calculate 2 + 2.",
+            images=("fixture/task-B/image-0.png",),
+            image_refs=(
+                {
+                    "asset_id": "fixture/task-B/image-0",
+                    "content_sha256": IMAGE_B_HASH,
+                },
+            ),
             ground_truth="4",
         ),
         SourceTask(
@@ -89,6 +105,13 @@ def test_fake_e2e_a_b_c_preserves_lineage_boundary_and_projection(tmp_path) -> N
     results = [builder.build_task(task) for task in _tasks()]
 
     a, b, c = results
+    assert a.trajectories[0].image_content_hashes == (IMAGE_A_HASH,)
+    assert all(
+        trajectory.image_content_hashes == (IMAGE_B_HASH,)
+        for trajectory in b.trajectories
+    )
+    assert all(not trajectory.image_content_hashes for trajectory in c.trajectories)
+
     a_decision, a_candidate = validate_trajectory_for_export(
         a.trajectories[0], source_guard=a.source_guard
     )
@@ -124,6 +147,10 @@ def test_fake_e2e_a_b_c_preserves_lineage_boundary_and_projection(tmp_path) -> N
 
     rows = Projector().project_many([a_candidate, b_candidate])
     assert len(rows) == 2
+    assert {row.image_content_hashes for row in rows} == {
+        (IMAGE_A_HASH,),
+        (IMAGE_B_HASH,),
+    }
     assert all(set(row.to_dict()) == {"messages", "images"} for row in rows)
 
     pipeline = validate_project_deduplicate(

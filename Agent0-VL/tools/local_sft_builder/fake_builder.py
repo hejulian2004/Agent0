@@ -28,8 +28,24 @@ class SourceTask:
     usage_partition: str | None = None
     source_revision: str = "fixture-v1"
 
+    def __post_init__(self) -> None:
+        if len(self.images) != len(self.image_refs):
+            raise ValueError(
+                "images and image_refs must contain the same number of items"
+            )
+        for index, image_ref in enumerate(self.image_refs):
+            if "content_sha256" not in image_ref:
+                raise ValueError(
+                    f"image_refs[{index}] requires content_sha256"
+                )
+
+    @property
+    def image_content_hashes(self) -> tuple[str, ...]:
+        """Return ordered image hashes from the canonical image references."""
+
+        return tuple(ref["content_sha256"] for ref in self.image_refs)
+
     def as_source_record(self) -> dict[str, Any]:
-        image_hashes = [item.get("content_sha256") for item in self.image_refs]
         return {
             "task_id": self.task_id,
             "source_record_id": self.source_record_id,
@@ -37,7 +53,8 @@ class SourceTask:
             "source_dataset": self.source_dataset,
             "source_revision": self.source_revision,
             "question": self.question,
-            "image_content_hashes": image_hashes,
+            "image_count": len(self.images),
+            "image_content_hashes": list(self.image_content_hashes),
             "split": self.split,
             "usage_partition": self.usage_partition or self.stage,
         }
@@ -250,6 +267,7 @@ class FakeTrajectoryBuilder:
                 stage=task.stage,
                 messages=natural_messages,
                 images=task.images,
+                image_content_hashes=task.image_content_hashes,
                 canonical_source="natural",
                 lineage_events=("natural",),
                 ancestor_trajectory_ids=(),
@@ -282,6 +300,7 @@ class FakeTrajectoryBuilder:
             stage=task.stage,
             messages=natural_messages,
             images=task.images,
+            image_content_hashes=task.image_content_hashes,
             canonical_source="natural",
             lineage_events=("natural",),
             root_snapshot_hash=root.snapshot_hash,
@@ -384,6 +403,7 @@ class FakeTrajectoryBuilder:
             stage=task.stage,
             messages=natural_messages,
             images=task.images,
+            image_content_hashes=task.image_content_hashes,
             canonical_source="controlled",
             lineage_events=("natural", "controlled", "verifier", "repair", "regeneration"),
             ancestor_trajectory_ids=(trajectory_id,),
@@ -417,6 +437,7 @@ class FakeTrajectoryBuilder:
                     stage=task.stage,
                     messages=replay_messages,
                     images=task.images,
+                    image_content_hashes=task.image_content_hashes,
                     canonical_source="natural_replay",
                     lineage_events=("natural_replay",),
                     ancestor_trajectory_ids=(),

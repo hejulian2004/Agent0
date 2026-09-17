@@ -85,3 +85,36 @@ def test_absolute_paths_are_not_valid_snapshot_asset_ids() -> None:
             messages=[{"role": "user", "content": "Q"}],
             original_images=[{"asset_id": r"D:\data\image.png", "content_sha256": "b" * 64}],
         )
+
+
+@pytest.mark.parametrize("field_name", ("original_images", "derived_images"))
+def test_snapshot_assets_require_hashed_mappings(field_name: str) -> None:
+    invalid_assets = (
+        "dataset/item-1/image-0",
+        {"asset_id": "dataset/item-1/image-0"},
+        {"asset_id": "dataset/item-1/image-0", "content_sha256": None},
+        {"asset_id": "dataset/item-1/image-0", "content_sha256": "A" * 64},
+        {"asset_id": "dataset/item-1/image-0", "content_sha256": "b" * 63},
+    )
+    for asset in invalid_assets:
+        with pytest.raises((TypeError, ValueError)):
+            ImmutableSnapshot.create(
+                messages=[{"role": "user", "content": "Q"}],
+                **{field_name: [asset]},
+            )
+
+
+def test_snapshot_hash_binds_asset_content_hash() -> None:
+    first = ImmutableSnapshot.create(
+        messages=[{"role": "user", "content": "Q"}],
+        original_images=[
+            {"asset_id": "dataset/item-1/image-0", "content_sha256": "b" * 64}
+        ],
+    )
+    second = ImmutableSnapshot.create(
+        messages=[{"role": "user", "content": "Q"}],
+        original_images=[
+            {"asset_id": "dataset/item-1/image-0", "content_sha256": "c" * 64}
+        ],
+    )
+    assert first.snapshot_hash != second.snapshot_hash

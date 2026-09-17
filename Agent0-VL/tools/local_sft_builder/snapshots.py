@@ -42,14 +42,13 @@ def _thaw(value: Any) -> Any:
 
 
 def _logical_asset(value: Any) -> dict[str, str]:
-    if isinstance(value, str):
-        asset_id = value
-        content_hash = None
-    elif isinstance(value, Mapping):
-        asset_id = value.get("asset_id") or value.get("logical_asset_id")
-        content_hash = value.get("content_sha256")
-    else:
-        raise TypeError("image reference must be a string or mapping")
+    if not isinstance(value, Mapping):
+        raise TypeError(
+            "image reference must be a mapping with asset_id and content_sha256"
+        )
+
+    asset_id = value.get("asset_id") or value.get("logical_asset_id")
+    content_hash = value.get("content_sha256")
 
     if not asset_id or not isinstance(asset_id, str):
         raise ValueError("image reference requires a logical asset_id")
@@ -58,9 +57,8 @@ def _logical_asset(value: Any) -> dict[str, str]:
     # provide a logical ID such as ``dataset/item-7/image-0`` instead.
     if asset_id.startswith("/") or re.match(r"^[A-Za-z]:/", asset_id):
         raise ValueError("absolute image paths are not valid snapshot asset IDs")
-    if content_hash is not None:
-        if not isinstance(content_hash, str) or not _HASH_RE.fullmatch(content_hash):
-            raise ValueError("content_sha256 must be a lowercase SHA256 hex digest")
+    if not isinstance(content_hash, str) or not _HASH_RE.fullmatch(content_hash):
+        raise ValueError("content_sha256 must be a lowercase SHA256 hex digest")
     return {"asset_id": asset_id, "content_sha256": content_hash}
 
 
