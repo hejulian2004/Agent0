@@ -25,6 +25,9 @@ from .source_adapter import (
 from .source_guard import SourceLeakageGuard
 
 
+EXPECTED_BASE_SHA = "f775b5101e62fe92976831adf4a21a38fcc0a767"
+
+
 class RunDirectoryConflict(RuntimeError):
     """Raised when a run would overwrite an existing directory."""
 
@@ -65,6 +68,14 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _frozen_base_sha(value: str) -> str:
+    if value != EXPECTED_BASE_SHA:
+        raise argparse.ArgumentTypeError(
+            f"must equal the frozen Phase 2A base SHA {EXPECTED_BASE_SHA}"
+        )
+    return value
+
+
 def _write_jsonl(path: Path, values: Sequence[dict]) -> None:
     with path.open("w", encoding="utf-8", newline="\n") as handle:
         for value in values:
@@ -103,7 +114,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--image-root-config")
     parser.add_argument("--max-tasks", type=_positive_int, required=True)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--base-sha")
+    parser.add_argument(
+        "--base-sha",
+        type=_frozen_base_sha,
+        required=True,
+        help=f"frozen Phase 2A base commit ({EXPECTED_BASE_SHA})",
+    )
     parser.add_argument("--phase1-freeze-sha", required=True)
     parser.add_argument("--repo-root")
     parser.add_argument("--dry-run", action="store_true")
@@ -119,7 +135,15 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     if output_dir.exists():
         raise RunDirectoryConflict(f"refusing to overwrite existing run directory: {output_dir}")
 
-    base_sha = _git_revision(repo_root, args.base_sha or "main")
+    if args.base_sha != EXPECTED_BASE_SHA:
+        raise ValueError(
+            f"Phase 2A base SHA must equal the frozen commit {EXPECTED_BASE_SHA}"
+        )
+    base_sha = _git_revision(repo_root, args.base_sha)
+    if base_sha != EXPECTED_BASE_SHA:
+        raise ValueError(
+            f"resolved Phase 2A base SHA does not equal the frozen commit {EXPECTED_BASE_SHA}"
+        )
     phase1_freeze_sha = _git_revision(repo_root, args.phase1_freeze_sha)
     builder_commit_sha = _git_revision(repo_root, "HEAD")
 

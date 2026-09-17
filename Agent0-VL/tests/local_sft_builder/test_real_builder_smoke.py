@@ -4,8 +4,10 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from tools.local_sft_builder.canonical import sha256_file
-from tools.local_sft_builder.run_real_builder import main
+from tools.local_sft_builder.run_real_builder import EXPECTED_BASE_SHA, main
 from tools.local_sft_builder.run_manifest import build_phase2a_manifest
 
 
@@ -62,7 +64,7 @@ def test_phase2a_dry_run_writes_only_preflight_outputs(tmp_path: Path) -> None:
             "--seed",
             "0",
             "--base-sha",
-            "HEAD",
+            EXPECTED_BASE_SHA,
             "--phase1-freeze-sha",
             "HEAD",
             "--dry-run",
@@ -81,7 +83,8 @@ def test_phase2a_dry_run_writes_only_preflight_outputs(tmp_path: Path) -> None:
 
     manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["phase2a_manifest_version"].endswith("manifest.v1")
-    assert manifest["base_sha"] == manifest["builder_commit_sha"]
+    assert manifest["base_sha"] == EXPECTED_BASE_SHA
+    assert manifest["base_sha"] != manifest["builder_commit_sha"]
     assert manifest["phase1_freeze_sha"] == manifest["builder_commit_sha"]
     assert manifest["source_file_sha256"][str(source_path.resolve())] == sha256_file(source_path)
     assert manifest["image_root_config"] == "fixture-images-v1"
@@ -127,6 +130,8 @@ def test_phase2a_dry_run_rejects_output_overwrite(tmp_path: Path) -> None:
             str(output_dir),
             "--max-tasks",
             "1",
+            "--base-sha",
+            EXPECTED_BASE_SHA,
             "--phase1-freeze-sha",
             "HEAD",
             "--dry-run",
@@ -134,6 +139,37 @@ def test_phase2a_dry_run_rejects_output_overwrite(tmp_path: Path) -> None:
     )
 
     assert exit_code == 2
+
+
+def test_phase2a_rejects_missing_or_moving_base_reference_before_preflight(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "source.jsonl"
+    source_path.write_text("not-read\n", encoding="utf-8")
+
+    common_args = [
+        "--source-path",
+        str(source_path),
+        "--stage",
+        "stage1",
+        "--output-run-dir",
+        str(tmp_path / "run"),
+        "--max-tasks",
+        "1",
+        "--phase1-freeze-sha",
+        "HEAD",
+        "--dry-run",
+    ]
+
+    with pytest.raises(SystemExit) as missing:
+        main(common_args)
+    assert missing.value.code == 2
+    assert not (tmp_path / "run").exists()
+
+    with pytest.raises(SystemExit) as moving_main:
+        main([*common_args, "--base-sha", "main"])
+    assert moving_main.value.code == 2
+    assert not (tmp_path / "run").exists()
 
 
 def test_manifest_image_root_identity_excludes_machine_path(tmp_path: Path) -> None:
