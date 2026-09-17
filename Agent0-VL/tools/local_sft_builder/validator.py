@@ -38,7 +38,11 @@ class RepairDepthStats:
     branch_actual_repair_count: int
 
 
-def _message_shape_valid(messages: Iterable[dict[str, Any]]) -> tuple[bool, str | None]:
+def _message_shape_valid(
+    messages: Iterable[dict[str, Any]],
+    *,
+    require_assistant: bool = True,
+) -> tuple[bool, str | None]:
     items = list(messages)
     if not items:
         return False, "empty_messages"
@@ -48,7 +52,7 @@ def _message_shape_valid(messages: Iterable[dict[str, Any]]) -> tuple[bool, str 
         return False, "message_content_must_be_text"
     if not any(item["role"] == "user" for item in items):
         return False, "missing_user_message"
-    if not any(item["role"] == "assistant" for item in items):
+    if require_assistant and not any(item["role"] == "assistant" for item in items):
         return False, "missing_assistant_message"
     return True, None
 
@@ -60,7 +64,10 @@ def _image_placeholders(messages: Iterable[dict[str, Any]]) -> int:
 def validate_supervision_unit(unit: SupervisionUnit) -> ValidationDecision:
     """Validate one internal target without making it a training ExportRow."""
 
-    valid_shape, shape_reason = _message_shape_valid(unit.context_messages)
+    valid_shape, shape_reason = _message_shape_valid(
+        unit.context_messages,
+        require_assistant=False,
+    )
     if not valid_shape:
         return ValidationDecision(
             status="review_required",

@@ -39,4 +39,6 @@ def test_observation_matches_upstream_runtime_wrapper() -> None:
     observation = format_code_execution_observation(
         [{"status": "success", "run_result": {"stdout": "4\n", "stderr": ""}}]
     )
-    assert observation == "\n[Code Execution Result]\nOutput: 4\n"
+    # The upstream evaluator appends a newline to stdout that already ends in
+    # a newline, so this intentionally contains two trailing newlines.
+    assert observation == "\n[Code Execution Result]\nOutput: 4\n\n"
