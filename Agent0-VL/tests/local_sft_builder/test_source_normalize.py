@@ -15,9 +15,10 @@ from tools.local_sft_builder.source_adapter import (
 from tools.local_sft_builder.source_guard import SourceLeakageGuard
 from tools.local_sft_builder.source_normalize import (
     ANSWER_CHECK_METHOD,
+    EXPECTED_RETOOL_REVISION,
     GROUND_TRUTH_ORIGIN,
     REVISION_ORIGIN_DECLARED,
-    REVISION_ORIGIN_GIT_HEAD,
+    REVISION_ORIGIN_PINNED,
     RawSourceError,
     RowReviewRequired,
     UnsupportedDatasetError,
@@ -542,18 +543,23 @@ def test_usage_partition_mismatch_is_review_required(staged: dict) -> None:
 # --------------------------------------------------------------------------
 
 
-DERIVED_REVISION = "13eb7a396284caa114d677af3d071864c27ba5cc"
-
-
-def _null_revision_formal(staged: dict, name: str) -> Path:
+def _null_revision_formal(
+    staged: dict,
+    name: str,
+    *,
+    dataset: str = "mulberry",
+    original_id: str = "mulberry-260494",
+    row_index: int = 1,
+    image_ref: str | None = "cauldron/clevr/images/clevr_00011395.png",
+) -> Path:
     return _write_jsonl(
         staged["tmp_path"] / name,
         [
             _formal_row(
-                dataset="mulberry",
-                original_id="mulberry-260494",
-                row_index=1,
-                image_ref="cauldron/clevr/images/clevr_00011395.png",
+                dataset=dataset,
+                original_id=original_id,
+                row_index=row_index,
+                image_ref=image_ref,
                 revision=None,
             )
         ],
@@ -571,6 +577,8 @@ def test_declared_revision_origin_is_recorded(staged: dict) -> None:
         raw_overrides={"retool": staged["retool_path"]},
     )
 
+    # A declared revision is passed through untouched.
+    assert [row.source_revision for row in rows] == [REVISION, REVISION]
     assert [row.revision_origin for row in rows] == [
         REVISION_ORIGIN_DECLARED,
         REVISION_ORIGIN_DECLARED,
@@ -578,51 +586,44 @@ def test_declared_revision_origin_is_recorded(staged: dict) -> None:
     assert stats.revision_origin_counts == {REVISION_ORIGIN_DECLARED: 2}
 
 
-def test_missing_revision_is_derived_from_local_git_head(
-    staged: dict,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "tools.local_sft_builder.source_normalize.derive_git_revision",
-        lambda directory: DERIVED_REVISION,
-    )
-
+def test_missing_mulberry_revision_is_review_required(staged: dict) -> None:
     rows, stats = normalize_stage(
-        formal_source=_null_revision_formal(staged, "derived.jsonl"),
+        formal_source=_null_revision_formal(staged, "mulberry-no-revision.jsonl"),
         stage="stage1",
         usage_partition="sft_stage1",
         raw_root=staged["raw_root"],
         image_root=staged["image_root"],
         per_dataset_limit={"mulberry": 10},
+    )
+
+    # No revision is invented for a dataset that has no pinned fallback.
+    assert rows == []
+    assert stats.review_required == {"formal_source_revision_unresolvable": 1}
+
+
+def test_missing_retool_revision_uses_the_pinned_constant(staged: dict) -> None:
+    rows, stats = normalize_stage(
+        formal_source=_null_revision_formal(
+            staged,
+            "retool-no-revision.jsonl",
+            dataset="retool",
+            original_id="retool-2",
+            row_index=0,
+            image_ref=None,
+        ),
+        stage="stage1",
+        usage_partition="sft_stage1",
+        raw_root=staged["raw_root"],
+        image_root=staged["image_root"],
+        per_dataset_limit={"retool": 10},
+        raw_overrides={"retool": staged["retool_path"]},
     )
 
     assert stats.review_required == {}
-    assert rows[0].source_revision == DERIVED_REVISION
-    assert rows[0].revision_origin == REVISION_ORIGIN_GIT_HEAD
-    assert rows[0].to_dict()["revision_origin"] == REVISION_ORIGIN_GIT_HEAD
-    assert stats.revision_origin_counts == {REVISION_ORIGIN_GIT_HEAD: 1}
-
-
-def test_unresolvable_revision_is_review_required(
-    staged: dict,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "tools.local_sft_builder.source_normalize.derive_git_revision",
-        lambda directory: None,
-    )
-
-    rows, stats = normalize_stage(
-        formal_source=_null_revision_formal(staged, "unresolvable.jsonl"),
-        stage="stage1",
-        usage_partition="sft_stage1",
-        raw_root=staged["raw_root"],
-        image_root=staged["image_root"],
-        per_dataset_limit={"mulberry": 10},
-    )
-
-    assert rows == []
-    assert stats.review_required == {"formal_source_revision_unresolvable": 1}
+    assert rows[0].source_revision == EXPECTED_RETOOL_REVISION
+    assert rows[0].revision_origin == REVISION_ORIGIN_PINNED
+    assert rows[0].to_dict()["revision_origin"] == REVISION_ORIGIN_PINNED
+    assert stats.revision_origin_counts == {REVISION_ORIGIN_PINNED: 1}
 
 
 # --------------------------------------------------------------------------

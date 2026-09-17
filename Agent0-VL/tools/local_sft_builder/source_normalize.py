@@ -24,7 +24,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,12 +52,21 @@ _DEFAULT_RAW_MEMBERS: dict[str, str] = {
     "retool": "retool-proxy/train_2000.parquet",
 }
 
-# ``source_revision`` provenance.  ReTool rows carry ``resolved_revision: null``
-# in the frozen partition, so the revision is recovered from the local git
-# checkout the artifact was fetched from.  That is a real, verifiable upstream
-# commit and is recorded as derived rather than declared.
+# ``source_revision`` provenance.
+#
+# Mulberry rows carry a usable ``resolved_revision`` in the frozen partition and
+# are recorded as declared.  ReTool rows carry ``resolved_revision: null``, so
+# Phase 2B-Lite pins their revision to a manually verified upstream commit and
+# labels it as pinned -- never as declared, and deliberately never as derived
+# from whichever local git checkout happens to be present.  Reading a local HEAD
+# proves nothing about the provenance of ``train_2000.parquet``.
+#
+# Phase 2B-Lite does NOT verify this constant against the remote or the LFS
+# pointer.  It is a data-version label for this round only.
 REVISION_ORIGIN_DECLARED = "declared_resolved_revision"
-REVISION_ORIGIN_GIT_HEAD = "derived_from_local_git_head"
+REVISION_ORIGIN_PINNED = "pinned_retool_revision"
+
+EXPECTED_RETOOL_REVISION = "13eb7a396284caa114d677af3d071864c27ba5cc"
 
 
 class SourceNormalizeError(RuntimeError):
@@ -292,60 +300,26 @@ def _load_parquet_rows(path: Path) -> list[dict[str, Any]]:
     return [dict(row) for row in table.to_pylist()]
 
 
-_REVISION_RE = re.compile(r"^[0-9a-f]{7,64}$")
-
-
-def derive_git_revision(directory: Path) -> str | None:
-    """Return the HEAD commit of the git checkout that owns ``directory``.
-
-    Used only when the frozen partition records no ``resolved_revision``.  The
-    result is a real upstream commit, never a synthesized placeholder.
-    """
-
-    if not directory.is_dir():
-        return None
-    try:
-        completed = subprocess.run(
-            [
-                "git",
-                "-c",
-                f"safe.directory={directory}",
-                "-C",
-                str(directory),
-                "rev-parse",
-                "--verify",
-                "HEAD^{commit}",
-            ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            check=False,
-        )
-    except OSError:
-        return None
-    if completed.returncode != 0:
-        return None
-    revision = completed.stdout.strip()
-    if not _REVISION_RE.fullmatch(revision):
-        return None
-    return revision
-
-
 def resolve_source_revision(
     formal_row: Mapping[str, Any],
-    raw_directory: Path,
+    dataset: str,
 ) -> tuple[str, str]:
-    """Return ``(source_revision, revision_origin)`` for one formal row."""
+    """Return ``(source_revision, revision_origin)`` for one formal row.
+
+    A usable ``resolved_revision`` is taken as declared.  ReTool rows carry none
+    in the frozen partition, so they fall back to the revision pinned for this
+    round.  Any other dataset without one goes to review: a revision is never
+    invented for it.
+    """
 
     declared = formal_row.get("resolved_revision")
     if isinstance(declared, str):
         candidate = normalize_text(declared).strip()
         if candidate and candidate.casefold() != "unknown":
             return candidate, REVISION_ORIGIN_DECLARED
-    derived = derive_git_revision(raw_directory)
-    if derived is None:
-        raise RowReviewRequired("formal_source_revision_unresolvable")
-    return derived, REVISION_ORIGIN_GIT_HEAD
+    if dataset == "retool":
+        return EXPECTED_RETOOL_REVISION, REVISION_ORIGIN_PINNED
+    raise RowReviewRequired("formal_source_revision_unresolvable")
 
 
 def fetch_raw_records(
@@ -489,15 +463,12 @@ def normalize_formal_row(
     usage_partition: str,
     task_id: str,
     image_root: Path | None,
-    raw_directory: Path,
 ) -> NormalizedRow:
     """Build one normalized source row, or raise ``RowReviewRequired``."""
 
     source_record_id = _require_text(formal_row, "source_record_id")
     original_id = _require_text(formal_row, "original_id")
-    source_revision, revision_origin = resolve_source_revision(
-        formal_row, raw_directory
-    )
+    source_revision, revision_origin = resolve_source_revision(formal_row, dataset)
     split = _require_text(formal_row, "split")
     if split != "train":
         raise RowReviewRequired("formal_split_is_not_train")
@@ -790,7 +761,6 @@ def normalize_stage(
         member = overrides.get(dataset) or (raw_root / _DEFAULT_RAW_MEMBERS[dataset])
         if not member.is_file():
             raise RawSourceError(f"raw artifact for {dataset} is not readable: {member}")
-        raw_directory = member.parent
         records = fetch_raw_records(dataset, member, [index for index, _ in bucket])
         for row_index, formal_row in bucket:
             raw_record = records.get(row_index)
@@ -810,7 +780,6 @@ def normalize_stage(
                     usage_partition=usage_partition,
                     task_id=task_id,
                     image_root=image_root,
-                    raw_directory=raw_directory,
                 )
             except RowReviewRequired as exc:
                 stats.note_review(dataset, row_index, exc.code)

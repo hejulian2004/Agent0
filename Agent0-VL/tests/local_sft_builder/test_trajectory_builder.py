@@ -367,53 +367,6 @@ def test_final_answer_without_the_frozen_shape_is_rejected(tmp_path) -> None:
 
 
 # --------------------------------------------------------------------------
-# Task Analysis scope
-# --------------------------------------------------------------------------
-
-
-def test_task_analysis_is_skipped_by_default(tmp_path) -> None:
-    builder, teacher, _sandbox = _builder(tmp_path, [FINAL_TURN])
-
-    result = builder.build_task(_task())
-
-    record = _audit(result, "task_analysis")
-    assert record["status"] == "skipped"
-    assert record["reason"] == "phase2b_p0_scope"
-    assert result.trajectories[0].target_repair_depth_frozen == 0
-    assert [request["role"] for request in teacher.requests] == ["natural"]
-
-
-def test_task_analysis_freezes_the_target_depth_when_enabled(tmp_path) -> None:
-    analysis = json.dumps({"target_repair_depth": 2})
-    builder, teacher, _sandbox = _builder(
-        tmp_path, [analysis, FINAL_TURN], enable_task_analysis=True
-    )
-
-    result = builder.build_task(_task())
-
-    assert [request["role"] for request in teacher.requests] == [
-        "task_analysis",
-        "natural",
-    ]
-    trajectory = result.trajectories[0]
-    assert trajectory.target_repair_depth == 2
-    assert trajectory.target_repair_depth_frozen == 2
-
-
-def test_task_analysis_parse_failure_stops_the_task(tmp_path) -> None:
-    builder, teacher, _sandbox = _builder(
-        tmp_path, ["not json at all", FINAL_TURN], enable_task_analysis=True
-    )
-
-    result = builder.build_task(_task())
-
-    assert result.trajectories == ()
-    assert result.candidates == ()
-    assert result.budget_stats.parse_failed == 1
-    assert [request["role"] for request in teacher.requests] == ["task_analysis"]
-
-
-# --------------------------------------------------------------------------
 # Clean lineage, source guard and manifest safety
 # --------------------------------------------------------------------------
 

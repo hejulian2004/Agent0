@@ -2,8 +2,8 @@
 
 This is the real counterpart of :class:`~.fake_builder.FakeTrajectoryBuilder`.
 The state machine keeps the same shape -- accepted source, clean root
-snapshot, optional Task Analysis, natural rollout, frozen Validator -- and only
-the backend, runtime and source are swapped:
+snapshot, natural rollout, frozen Validator -- and only the backend, runtime
+and source are swapped:
 
 .. code-block:: text
 
@@ -46,7 +46,6 @@ and no ``system`` role is introduced because the frozen Validator only accepts
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -106,13 +105,6 @@ SOLVER_PROMPT_SCAFFOLD = (
     "  CONFIDENCE: <a number between 0 and 1>\n"
     "  FINAL_ANSWER: <your final answer on one line>\n"
 )
-
-ANALYSIS_PROMPT = (
-    "You are a task analyst for a tool-using vision-language agent.\n"
-    "Return exactly one JSON object, on one line, with the single key\n"
-    '"target_repair_depth" whose value is 0, 1 or 2.\n'
-)
-
 
 def build_solver_user_content(question: str) -> str:
     """Fold the protocol scaffold into the first user message.
@@ -229,7 +221,6 @@ class RealTrajectoryBuilder:
         max_reasoning_steps: int = DEFAULT_MAX_REASONING_STEPS,
         max_rollout_turns: int | None = None,
         budget_limit: int = DEFAULT_BUDGET_LIMIT,
-        enable_task_analysis: bool = False,
         sampling: Any | None = None,
     ):
         if max_reasoning_steps <= 0:
@@ -249,7 +240,6 @@ class RealTrajectoryBuilder:
         self.max_reasoning_steps = max_reasoning_steps
         self.max_rollout_turns = max_rollout_turns or max_reasoning_steps
         self.budget_limit = budget_limit
-        self.enable_task_analysis = enable_task_analysis
         self.sampling = sampling
 
     def describe(self) -> dict[str, Any]:
@@ -262,7 +252,9 @@ class RealTrajectoryBuilder:
             "max_rollout_turns": self.max_rollout_turns,
             "max_reasoning_steps": self.max_reasoning_steps,
             "budget_limit_per_task": self.budget_limit,
-            "task_analysis_enabled": self.enable_task_analysis,
+            # Phase 2B-Lite never calls Task Analysis.  The field stays so the
+            # manifest keeps stating that explicitly rather than omitting it.
+            "task_analysis_enabled": False,
             "step_validation": STEP_VALIDATION_NOTE,
             "ground_truth_origin": GROUND_TRUTH_ORIGIN,
             **describe_answer_check(),
@@ -303,40 +295,6 @@ class RealTrajectoryBuilder:
             sandbox_state_mode="stateless",
             base_sha=self.base_sha,
         )
-
-    # -- optional Task Analysis --------------------------------------------
-
-    @staticmethod
-    def _analysis_parser(value: Any) -> dict[str, Any]:
-        parsed = json.loads(_response_text(value))
-        if not isinstance(parsed, dict):
-            raise ValueError("Task Analysis must return an object")
-        depth = parsed.get("target_repair_depth")
-        if isinstance(depth, bool) or not isinstance(depth, int) or not 0 <= depth <= 2:
-            raise ValueError("target_repair_depth must be 0, 1 or 2")
-        return parsed
-
-    def _analysis(
-        self,
-        budget: TeacherRequestBudget,
-        task: SourceTask,
-    ) -> tuple[int, dict[str, Any]] | None:
-        messages = [{"role": "user", "content": f"{ANALYSIS_PROMPT}\n{task.question}"}]
-        result = budget.execute(
-            role="task_analysis",
-            backend=self.backend.generate_from_payload,
-            payload={
-                "role": "task_analysis",
-                "messages": messages,
-                "images": list(task.images),
-                "sampling": self.sampling,
-            },
-            parser=self._analysis_parser,
-        )
-        if result.status != "successful":
-            return None
-        analysis = result.value
-        return int(analysis["target_repair_depth"]), analysis
 
     # -- natural rollout ----------------------------------------------------
 
@@ -520,43 +478,23 @@ class RealTrajectoryBuilder:
 
         root = self._root_snapshot(task)
 
+        # Phase 2B-Lite runs the natural rollout only: Task Analysis is never
+        # called, so the target repair depth is fixed at 0 for every task.  The
+        # audit record is kept so the run still states that explicitly instead
+        # of leaving a silent gap.
         target_depth = 0
-        if self.enable_task_analysis:
-            analysis_result = self._analysis(budget, task)
-            if analysis_result is None:
-                audit_records.append(
-                    self._audit(
-                        task,
-                        f"{task.task_id}:task_analysis",
-                        "task_analysis",
-                        {"status": "review_required"},
-                    )
-                )
-                return self._empty_result(
-                    task, root, audit_records, source_decision, budget, None
-                )
-            target_depth, analysis = analysis_result
-            audit_records.append(
-                self._audit(
-                    task,
-                    f"{task.task_id}:task_analysis",
-                    "task_analysis",
-                    {"status": "successful", "analysis": analysis},
-                )
+        audit_records.append(
+            self._audit(
+                task,
+                f"{task.task_id}:task_analysis",
+                "task_analysis",
+                {
+                    "status": "skipped",
+                    "reason": "phase2b_p0_scope",
+                    "target_repair_depth": target_depth,
+                },
             )
-        else:
-            audit_records.append(
-                self._audit(
-                    task,
-                    f"{task.task_id}:task_analysis",
-                    "task_analysis",
-                    {
-                        "status": "skipped",
-                        "reason": "phase2b_p0_scope",
-                        "target_repair_depth": target_depth,
-                    },
-                )
-            )
+        )
 
         outcome = self._rollout(budget, task)
         rollout_payload = outcome.to_dict()

@@ -232,7 +232,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-reasoning-steps", type=_positive_int, default=8)
     parser.add_argument("--budget-limit", type=_positive_int, default=32)
     parser.add_argument("--sandbox-timeout", type=_positive_float)
-    parser.add_argument("--enable-task-analysis", action="store_true")
     return parser
 
 
@@ -386,7 +385,6 @@ def _run_generate(args: argparse.Namespace) -> dict[str, object]:
         source_guard=SourceLeakageGuard(),
         max_reasoning_steps=args.max_reasoning_steps,
         budget_limit=args.budget_limit,
-        enable_task_analysis=args.enable_task_analysis,
         sampling=sampling,
     )
 
