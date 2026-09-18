@@ -29,13 +29,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
+from .answer_check import ANSWER_CHECK_METHOD
 from .canonical import normalize_text, sha256_file, sha256_json
 
 SOURCE_SCHEMA_VERSION = "agent0vl.local_sft_builder.source.v1"
 NORMALIZE_VERSION = "agent0vl.local_sft_builder.source_normalize.v1"
 
 GROUND_TRUTH_ORIGIN = "source_assistant_final_answer"
-ANSWER_CHECK_METHOD = "reference_answer_match_v1"
+# Re-exported for the manifests this module writes.  It is imported rather than
+# redefined: a local copy silently went stale when the comparison was relaxed
+# to v2, and two constants with one name is a provenance hazard.
 
 _IMAGE_TOKEN = "<image>"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.local_sft_builder.answer_check import MATCH, MISMATCH
+from tools.local_sft_builder.answer_check import ANSWER_CHECK_METHOD, MATCH, MISMATCH
 from tools.local_sft_builder.budget import TeacherRequestBudget
 from tools.local_sft_builder.fake_builder import SourceTask
 from tools.local_sft_builder.manifest import build_manifest
@@ -27,6 +27,8 @@ from tools.local_sft_builder.trajectory_builder import (
     FAILURE_MAX_TURNS,
     FAILURE_NO_TERMINAL,
     GROUND_TRUTH_ORIGIN,
+    SOLVER_PROMPT_ADDENDUM,
+    SOLVER_PROMPT_ADDENDUM_VERSION,
     SOLVER_PROMPT_VERSION,
     SOLVER_SYSTEM_PROMPT,
     STEP_VALIDATION_NOTE,
@@ -232,6 +234,86 @@ def test_solver_system_prompt_can_be_disabled(tmp_path) -> None:
     ]
 
 
+def test_prompt_addendum_rides_the_system_message_only(tmp_path) -> None:
+    """The local suffix must never reach the exported row.
+
+    Training re-supplies the upstream instruction through ``--system``; a local
+    suffix inside the row would silently change what the student is trained on.
+    """
+
+    addendum = "\n\nEnvironment notes for this task:\n- local clause"
+    builder, teacher, _sandbox = _builder(
+        tmp_path, [FINAL_TURN], solver_prompt_addendum=addendum
+    )
+
+    result = builder.build_task(_task())
+
+    assert teacher.requests[0]["messages"][0] == {
+        "role": "system",
+        "content": SOLVER_SYSTEM_PROMPT + addendum,
+    }
+    exported = "\n".join(message["content"] for message in result.rollout.messages)
+    assert "local clause" not in exported
+
+
+def test_builder_sends_no_addendum_by_default(tmp_path) -> None:
+    """Unit tests and pre-addendum comparison runs keep the upstream prompt."""
+
+    builder, _teacher, _sandbox = _builder(tmp_path, [FINAL_TURN])
+
+    assert builder.solver_prompt_addendum is None
+    assert builder.effective_solver_system_prompt == SOLVER_SYSTEM_PROMPT
+
+
+def test_manifest_records_the_addendum_separately_from_the_protocol(tmp_path) -> None:
+    addendum = "\n\nEnvironment notes for this task:\n- local clause"
+    builder, _teacher, _sandbox = _builder(
+        tmp_path, [FINAL_TURN], solver_prompt_addendum=addendum
+    )
+
+    described = builder.describe()
+
+    assert described["solver_system_prompt_exported"] is False
+    assert (
+        described["solver_prompt_addendum_version"]
+        == SOLVER_PROMPT_ADDENDUM_VERSION
+    )
+    assert (
+        described["solver_prompt_addendum_sha256"]
+        != described["solver_system_prompt_sha256"]
+    )
+    assert described["effective_solver_system_prompt_sha256"] is not None
+
+
+def test_manifest_marks_the_addendum_absent_when_disabled(tmp_path) -> None:
+    builder, _teacher, _sandbox = _builder(tmp_path, [FINAL_TURN])
+
+    described = builder.describe()
+
+    assert described["solver_prompt_addendum_sha256"] is None
+    assert described["solver_prompt_addendum_version"] is None
+    assert (
+        described["effective_solver_system_prompt_sha256"]
+        == described["solver_system_prompt_sha256"]
+    )
+
+
+def test_default_addendum_states_the_sandbox_cannot_see_the_image() -> None:
+    """The clause exists because the upstream prompt invites the impossible.
+
+    ``SOLVER_SYSTEM_PROMPT`` tells the Teacher it may "manipulate the image
+    (crop, resize, adjust contrast)", but the sandbox has no image file and no
+    matplotlib/cv2.  Measured, that mismatch produced compliance theatre such as
+    ``Image.open("chart.png") if False else None``.
+    """
+
+    assert SOLVER_SYSTEM_PROMPT.count("manipulate the image") == 1
+    assert "no image file" in SOLVER_PROMPT_ADDENDUM
+    assert "matplotlib" in SOLVER_PROMPT_ADDENDUM
+    # The turn-discipline clause is what makes the code reach the sandbox at all.
+    assert "must NOT contain the final answer" in SOLVER_PROMPT_ADDENDUM
+
+
 # --------------------------------------------------------------------------
 # Termination contract
 # --------------------------------------------------------------------------
@@ -250,13 +332,83 @@ def test_final_answer_terminates_without_execution(tmp_path) -> None:
     assert result.rollout.executed_step_count == 0
 
 
-def test_final_answer_wins_over_a_code_block_in_the_same_response(tmp_path) -> None:
-    builder, _teacher, sandbox = _builder(tmp_path, [f"{FINAL_TURN}\n{CODE_TURN}"])
+def test_a_turn_with_code_and_an_answer_is_salvaged_into_a_tool_call(
+    tmp_path,
+) -> None:
+    """The premature answer is dropped and the code is run instead.
+
+    Terminating on the answer -- the upstream behaviour -- exports the code block
+    unexecuted, because the exported row is ``record.messages`` verbatim.
+    Measured on a 200-task run, 18.6% of exported rows carried a code block that
+    never ran, which teaches "write code, then answer without waiting".
+
+    Salvaging runs the code and re-asks, so the row ends with an answer that was
+    genuinely produced with the observation in context.
+    """
+
+    builder, teacher, sandbox = _builder(
+        tmp_path, [f"{FINAL_TURN}\n{CODE_TURN}", FINAL_TURN]
+    )
 
     result = builder.build_task(_task())
 
-    assert sandbox.calls == []
+    assert sandbox.calls == ["print(9)"]
+    assert len(teacher.requests) == 2
+    assert result.rollout.completed is True
     assert result.rollout.terminal_reason == TERMINAL_FINAL_ANSWER
+
+    roles = [message["role"] for message in result.rollout.messages]
+    assert roles == ["user", "assistant", "user", "assistant"]
+
+    salvaged_turn = result.rollout.messages[1]["content"]
+    # The premature answer is gone...
+    assert "FINAL_ANSWER" not in salvaged_turn
+    # ...while the reasoning and the code that justified the salvage survive.
+    assert "<think>The tallest bar reaches 9.</think>" in salvaged_turn
+    assert "```python\nprint(9)\n```" in salvaged_turn
+    assert "[Code Execution Result]" in result.rollout.messages[2]["content"]
+
+    # The re-request carried the sandbox observation, which is the whole point.
+    assert any(
+        "[Code Execution Result]" in str(message.get("content"))
+        for message in teacher.requests[1]["messages"]
+    )
+    assert result.rollout.turns[0].salvaged is True
+    assert result.rollout.executed_step_count == 1
+    # A salvaged trajectory is still a valid export: the final turn is the fresh
+    # answer, and the intervening observation is an ordinary ``user`` turn.
+    assert result.candidates
+    assert [m["role"] for m in result.candidates[0].messages] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+
+
+def test_a_second_violation_falls_back_to_the_upstream_termination(
+    tmp_path,
+) -> None:
+    """Salvage is capped at one per task, so the extra request cost is bounded."""
+
+    builder, _teacher, sandbox = _builder(
+        tmp_path,
+        [f"{FINAL_TURN}\n{CODE_TURN}", f"{FINAL_TURN}\n{CODE_TURN}"],
+    )
+
+    result = builder.build_task(_task())
+
+    assert sandbox.calls == ["print(9)"]
+    assert result.rollout.terminal_reason == TERMINAL_FINAL_ANSWER
+    assert [message["role"] for message in result.rollout.messages] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert result.rollout.turns[0].salvaged is True
+    assert result.rollout.turns[-1].salvaged is False
+    assert result.rollout.turns[-1].terminal is True
 
 
 def test_response_with_neither_answer_nor_code_is_a_hard_failure(tmp_path) -> None:
@@ -407,7 +559,7 @@ def test_audit_records_the_weak_label_provenance(tmp_path) -> None:
     }
     check = _audit(result, "reference_answer_check")
     assert check["ground_truth_origin"] == GROUND_TRUTH_ORIGIN
-    assert check["answer_check_method"] == "reference_answer_match_v1"
+    assert check["answer_check_method"] == ANSWER_CHECK_METHOD
     assert check["independently_verified"] is False
     assert check["reference_label_is_weak"] is True
     assert _audit(result, "natural_rollout")["step_validation"] == STEP_VALIDATION_NOTE

@@ -58,6 +58,7 @@ from .answer_check import (
     check_reference_answer,
     describe as describe_answer_check,
     extract_final_answer,
+    strip_final_answer,
 )
 from .budget import BudgetStats, RequestResult, TeacherRequestBudget
 from .canonical import sha256_json
@@ -120,6 +121,46 @@ SOLVER_SYSTEM_PROMPT = (
     "- When you are finished, put the final answer inside \\boxed{...}."
 )
 
+# A locally authored suffix for the Teacher-only system message.  It is NOT part
+# of the upstream protocol, and it is deliberately a separate value rather than
+# an edit to ``SOLVER_SYSTEM_PROMPT``: that constant is copied verbatim from the
+# evaluator and ``test_trajectory_builder`` asserts it has not drifted.
+#
+# It corrects two things, both measured against the real Teacher:
+#
+#   * Turn discipline.  The Teacher habitually writes the code block *and* the
+#     final answer in one turn, and the rollout terminates on the answer before
+#     the sandbox runs (``_rollout`` step 1), so the code becomes dead weight in
+#     the exported row.  Measured on 67 tasks: only 1.5% of rollouts executed
+#     any code.  Discipline alone was weak (3.4%), which is why it is paired
+#     with the capability clause.
+#   * Sandbox capability.  The sandbox is a bare ``python -c`` with no image
+#     file and no matplotlib/cv2 (measured), so the upstream invitation to
+#     "manipulate the image (crop, resize, adjust contrast)" cannot be honoured.
+#     Left unsaid, pressure to use code produces compliance theatre such as
+#     ``Image.open("chart.png") if False else None``.
+#
+# The 67-task sweep also showed that piling on more rules backfires: the most
+# aggressive variant wrote code in 83.6% of turns but terminated cleanly in only
+# 14.9%.  Keep this short and specific.
+SOLVER_PROMPT_ADDENDUM_VERSION = "agent0vl.local_sft_builder.tool_use_addendum.v1"
+SOLVER_PROMPT_ADDENDUM = (
+    "\n\n"
+    "Environment notes for this task:\n"
+    "- The sandbox cannot see the image: there is no image file in it, and "
+    "matplotlib and cv2 are not installed. Do not call Image.open, plt.imread "
+    "or cv2.imread. You can see the image yourself, so read the values you "
+    "need from it directly.\n"
+    "- Use code to compute with the values you read: arithmetic, unit "
+    "conversion, geometry, statistics, or checking a candidate answer. The "
+    "standard library and numpy are available.\n"
+    "- A turn that contains a code block must NOT contain the final answer. "
+    "Stop after the code block and wait for the sandbox output.\n"
+    "- Give the final answer only in a turn that contains no code block.\n"
+    "- If the sandbox returns an error, fix the code and run it again instead "
+    "of answering from the failed attempt."
+)
+
 
 def build_solver_user_content(question: str) -> str:
     """Return the exported user turn: the source question, verbatim.
@@ -157,6 +198,9 @@ class RolloutTurn:
     executed_block_count: int = 0
     sandbox_statuses: tuple[str, ...] = ()
     terminal: bool = False
+    # True when the turn carried a final answer *and* code, so the premature
+    # answer was dropped and the code was run instead of terminating.
+    salvaged: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -168,6 +212,7 @@ class RolloutTurn:
             "executed_block_count": self.executed_block_count,
             "sandbox_statuses": list(self.sandbox_statuses),
             "terminal": self.terminal,
+            "salvaged": self.salvaged,
         }
 
 
@@ -239,6 +284,7 @@ class RealTrajectoryBuilder:
         budget_limit: int = DEFAULT_BUDGET_LIMIT,
         sampling: Any | None = None,
         solver_system_prompt: str | None = SOLVER_SYSTEM_PROMPT,
+        solver_prompt_addendum: str | None = None,
     ):
         if max_reasoning_steps <= 0:
             raise ValueError("max_reasoning_steps must be positive")
@@ -259,6 +305,22 @@ class RealTrajectoryBuilder:
         self.budget_limit = budget_limit
         self.sampling = sampling
         self.solver_system_prompt = solver_system_prompt
+        # The addendum is a local suffix, tracked separately from the upstream
+        # prompt so the manifest can show exactly what was added and when.
+        self.solver_prompt_addendum = solver_prompt_addendum or None
+
+    @property
+    def effective_solver_system_prompt(self) -> str | None:
+        """The system message actually sent to the Teacher.
+
+        The upstream prompt stays byte-identical inside this value, so a
+        response can always be attributed to the frozen protocol plus a known,
+        recorded local suffix.
+        """
+
+        if self.solver_system_prompt is None:
+            return None
+        return self.solver_system_prompt + (self.solver_prompt_addendum or "")
 
     def describe(self) -> dict[str, Any]:
         """Non-secret provenance for the run manifest."""
@@ -274,6 +336,23 @@ class RealTrajectoryBuilder:
             "solver_system_prompt_sha256": (
                 sha256_json(self.solver_system_prompt)
                 if self.solver_system_prompt
+                else None
+            ),
+            # The local suffix is recorded separately from the upstream prompt
+            # so a run can be attributed to "frozen protocol + this addendum".
+            "solver_prompt_addendum_sha256": (
+                sha256_json(self.solver_prompt_addendum)
+                if self.solver_prompt_addendum
+                else None
+            ),
+            "solver_prompt_addendum_version": (
+                SOLVER_PROMPT_ADDENDUM_VERSION
+                if self.solver_prompt_addendum
+                else None
+            ),
+            "effective_solver_system_prompt_sha256": (
+                sha256_json(self.effective_solver_system_prompt)
+                if self.effective_solver_system_prompt
                 else None
             ),
             "max_rollout_turns": self.max_rollout_turns,
@@ -305,9 +384,10 @@ class RealTrajectoryBuilder:
         """
 
         request_messages = list(messages)
-        if self.solver_system_prompt:
+        system_prompt = self.effective_solver_system_prompt
+        if system_prompt:
             request_messages.insert(
-                0, {"role": "system", "content": self.solver_system_prompt}
+                0, {"role": "system", "content": system_prompt}
             )
         return budget.execute(
             role=role,
@@ -346,6 +426,8 @@ class RealTrajectoryBuilder:
         ]
         turns: list[RolloutTurn] = []
         executed_steps = 0
+        # At most one salvage per task; see the violation branch below.
+        salvage_used = False
 
         for turn_index in range(self.max_rollout_turns):
             result = self._request(budget, task, "natural", messages)
@@ -377,9 +459,46 @@ class RealTrajectoryBuilder:
                     error=str(exc),
                 )
 
-            # 1) The final-answer parser is the only termination authority.
+            # A turn must carry a final answer or executable code.  Neither is a
+            # hard failure, and this is checked before anything is executed.
             final_answer = extract_final_answer(text)
-            if final_answer is not None:
+            blocks = extract_python_blocks(text)
+            if final_answer is None and not blocks:
+                return RolloutOutcome(
+                    task_id=task.task_id,
+                    completed=False,
+                    terminal_reason=FAILURE_NO_TERMINAL,
+                    turns=tuple(turns),
+                    messages=tuple(messages),
+                    executed_step_count=executed_steps,
+                )
+
+            # A turn carrying both a code block and a final answer answered
+            # *before* seeing the sandbox output.  Terminating here -- the
+            # upstream behaviour -- ships that code as dead weight, because the
+            # exported row is ``record.messages`` verbatim: measured on a
+            # 200-task run, 18.6% of exported rows carried a code block that
+            # never ran.  Drop the premature answer, run the code, and let the
+            # next request answer with the observation actually in context.
+            #
+            # Salvage happens at most once per task.  A second violation falls
+            # back to the upstream semantics, which bounds the extra Teacher
+            # requests at one per task.
+            salvaged = False
+            if final_answer is not None and blocks and not salvage_used:
+                stripped_text = strip_final_answer(text)
+                stripped_blocks = extract_python_blocks(stripped_text)
+                # Stripping can in principle consume a fence that sat directly
+                # under an answer heading.  Salvage only when the code survives;
+                # otherwise fall through to the upstream termination.
+                if stripped_blocks:
+                    salvage_used = True
+                    salvaged = True
+                    text = stripped_text
+                    blocks = stripped_blocks
+
+            # 1) The final-answer parser is the only termination authority.
+            if final_answer is not None and not salvaged:
                 messages.append({"role": "assistant", "content": text})
                 turns.append(
                     RolloutTurn(
@@ -400,18 +519,6 @@ class RealTrajectoryBuilder:
                     final_assistant_text=text,
                 )
 
-            # 2) No final answer means the turn must carry executable code.
-            blocks = extract_python_blocks(text)
-            if not blocks:
-                return RolloutOutcome(
-                    task_id=task.task_id,
-                    completed=False,
-                    terminal_reason=FAILURE_NO_TERMINAL,
-                    turns=tuple(turns),
-                    messages=tuple(messages),
-                    executed_step_count=executed_steps,
-                )
-
             calls, results, observation = self.runtime.execute_solver_text(text)
             if observation is None:  # pragma: no cover - blocks imply execution
                 raise AssertionError("executed blocks must produce an observation")
@@ -428,6 +535,7 @@ class RealTrajectoryBuilder:
                     sandbox_statuses=tuple(
                         str(item.get("status")) for item in results
                     ),
+                    salvaged=salvaged,
                 )
             )
 

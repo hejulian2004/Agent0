@@ -22,12 +22,62 @@ from tools.local_sft_builder.answer_check import (
 )
 from tools.local_sft_builder.canonical import sha256_file
 from tools.local_sft_builder.run_manifest import PHASE2B_MANIFEST_VERSION
-from tools.local_sft_builder.run_real_builder import EXPECTED_BASE_SHA, main
+from tools.local_sft_builder.run_real_builder import (
+    EXPECTED_BASE_SHA,
+    _parser,
+    _resolve_solver_prompt_addendum,
+    main,
+)
 from tools.local_sft_builder.source_normalize import GROUND_TRUTH_ORIGIN
+from tools.local_sft_builder.trajectory_builder import SOLVER_PROMPT_ADDENDUM
 
 
 CREDENTIAL_ENV = "AGENT0_TEACHER_API_KEY"
 CREDENTIAL_VALUE = "stub-credential-do-not-publish"
+
+
+def _minimal_generate_argv() -> list[str]:
+    return [
+        "--generate",
+        "--source-path",
+        "normalized.jsonl",
+        "--stage",
+        "stage1",
+        "--output-run-dir",
+        "run",
+        "--max-tasks",
+        "1",
+        "--base-sha",
+        EXPECTED_BASE_SHA,
+        "--phase1-freeze-sha",
+        EXPECTED_BASE_SHA,
+    ]
+
+
+def test_default_max_tokens_leaves_room_for_think_and_answer() -> None:
+    """The default must not truncate the response before the answer appears.
+
+    Measured on the real Teacher: a 1024-token budget is consumed by the
+    ``<think>`` block before the final answer or a code block is ever emitted,
+    which failed every task in a 5-task smoke run.  2048 is the legacy builder's
+    default, and the production scripts pass 4096 explicitly.
+    """
+
+    args = _parser().parse_args(_minimal_generate_argv())
+
+    assert args.max_tokens >= 2048
+
+
+def test_solver_prompt_addendum_is_on_by_default_and_can_be_disabled() -> None:
+    """The tool-use addendum is the default; ``--no-...`` reproduces the old run."""
+
+    default_args = _parser().parse_args(_minimal_generate_argv())
+    assert _resolve_solver_prompt_addendum(default_args) == SOLVER_PROMPT_ADDENDUM
+
+    disabled = _parser().parse_args(
+        _minimal_generate_argv() + ["--no-solver-prompt-addendum"]
+    )
+    assert _resolve_solver_prompt_addendum(disabled) is None
 
 FINAL_TURN = (
     "<think>The tallest bar reaches 9.</think>\n"
@@ -353,7 +403,9 @@ def test_generate_writes_the_full_run_directory(tmp_path, monkeypatch) -> None:
     assert manifest["teacher"]["teacher_credential_configured"] is True
     assert manifest["teacher"]["teacher_credential_env"] == CREDENTIAL_ENV
     # The manifest guard rejects "token", so the limit is renamed.
-    assert manifest["teacher"]["sampling"]["max_output"] == 1024
+    # 2048, not 1024: a 1024-token budget is consumed by the ``<think>`` block
+    # before the answer or a code block is emitted (measured on the real Teacher).
+    assert manifest["teacher"]["sampling"]["max_output"] == 2048
     assert "max_tokens" not in manifest["teacher"]["sampling"]
     assert manifest["sandbox"]["sandbox_backend"] == "upstream_agent0_vl_sandbox"
     # R1 provenance, published next to the frozen Validator's own vocabulary.

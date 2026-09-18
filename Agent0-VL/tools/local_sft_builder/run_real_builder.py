@@ -48,7 +48,7 @@ from .teacher_backend import (
     TeacherBackend,
     SamplingConfig,
 )
-from .trajectory_builder import RealTrajectoryBuilder
+from .trajectory_builder import SOLVER_PROMPT_ADDENDUM, RealTrajectoryBuilder
 
 
 EXPECTED_BASE_SHA = "f775b5101e62fe92976831adf4a21a38fcc0a767"
@@ -149,6 +149,24 @@ def _write_jsonl(path: Path, values: Sequence[Mapping[str, Any]]) -> None:
             )
 
 
+def _resolve_solver_prompt_addendum(args: Any) -> str | None:
+    """Pick the local Teacher-only system-message suffix for this run.
+
+    The built-in addendum is the default.  Without it the Teacher writes the code
+    block and the final answer in the same turn, the rollout terminates on the
+    answer before the sandbox runs, and the code ships as dead weight in the
+    exported row -- measured at 1.5% of rollouts executing any code, versus
+    35.8% with a discipline clause.
+    """
+
+    if args.solver_prompt_addendum_file:
+        with open(args.solver_prompt_addendum_file, encoding="utf-8") as handle:
+            return handle.read()
+    if args.no_solver_prompt_addendum:
+        return None
+    return SOLVER_PROMPT_ADDENDUM
+
+
 def _candidate_to_dict(candidate: ExportCandidate) -> dict[str, Any]:
     return {
         "task_id": candidate.task_id,
@@ -226,12 +244,31 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--teacher-api-key-env", default=DEFAULT_API_KEY_ENV)
     parser.add_argument("--temperature", type=float, default=0.1)
     parser.add_argument("--top-p", type=float, default=0.9)
-    parser.add_argument("--max-tokens", type=_positive_int, default=1024)
+    # 2048 matches the legacy builder's default.  1024 truncated responses
+    # mid-``<think>``: measured on the real Teacher, a 1024-token budget is
+    # consumed before the final answer or the code block is ever emitted, which
+    # failed every task in a 5-task smoke run.
+    parser.add_argument("--max-tokens", type=_positive_int, default=2048)
     parser.add_argument("--request-timeout", type=_positive_float, default=300.0)
     # Rollout.
     parser.add_argument("--max-reasoning-steps", type=_positive_int, default=8)
     parser.add_argument("--budget-limit", type=_positive_int, default=32)
     parser.add_argument("--sandbox-timeout", type=_positive_float)
+    parser.add_argument(
+        "--solver-prompt-addendum-file",
+        help=(
+            "Read the local Teacher-only system-message suffix from this file. "
+            "Defaults to the built-in tool-use addendum."
+        ),
+    )
+    parser.add_argument(
+        "--no-solver-prompt-addendum",
+        action="store_true",
+        help=(
+            "Send the upstream Solver system prompt with no local suffix. "
+            "Reproduces the pre-addendum behaviour for comparison runs."
+        ),
+    )
     return parser
 
 
@@ -386,6 +423,7 @@ def _run_generate(args: argparse.Namespace) -> dict[str, object]:
         max_reasoning_steps=args.max_reasoning_steps,
         budget_limit=args.budget_limit,
         sampling=sampling,
+        solver_prompt_addendum=_resolve_solver_prompt_addendum(args),
     )
 
     trajectories: list[Any] = []
