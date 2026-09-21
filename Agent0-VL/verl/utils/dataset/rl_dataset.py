@@ -47,6 +47,14 @@ def collate_fn(data_list: list[dict]) -> dict:
 
     return {**tensors, **non_tensors}
 
+def _with_system_prompt(chat: list[dict], system_prompt: Optional[str]) -> list[dict]:
+    """Return a copy of chat with a system message when one is not present."""
+    prepared_chat = copy.deepcopy(chat)
+    if not system_prompt or any(message.get('role') == 'system' for message in prepared_chat):
+        return prepared_chat
+    return [{'role': 'system', 'content': system_prompt}, *prepared_chat]
+
+
 
 def process_image(image: dict, max_pixels: int = 2048 * 2048, min_pixels: int = 512 * 512):
     import math
@@ -89,7 +97,8 @@ class RLHFDataset(Dataset):
                  return_raw_chat: bool = False,
                  truncation: str = 'error',
                  filter_overlong_prompts: bool = False,
-                 num_workers: Optional[int] = None):
+                 num_workers: Optional[int] = None,
+                 system_prompt: Optional[str] = None):
         if not isinstance(parquet_files, (List, ListConfig)):
             parquet_files = [parquet_files]
 
@@ -107,6 +116,7 @@ class RLHFDataset(Dataset):
         self.chat_template_func = chat_template_func
         self.truncation = truncation
         self.filter_overlong_prompts = filter_overlong_prompts
+        self.system_prompt = self._load_system_prompt(system_prompt)
         if num_workers is None:
             self.num_workers = max(1, os.cpu_count() // 4)
         else:
@@ -117,6 +127,25 @@ class RLHFDataset(Dataset):
         self.serialize_dataset = False
         self._download()
         self._read_files_and_tokenize()
+
+    @staticmethod
+    def _load_system_prompt(system_prompt: Optional[str]) -> Optional[str]:
+        if not system_prompt:
+            return None
+
+        prompt_path = os.path.expanduser(str(system_prompt))
+        if os.path.isfile(prompt_path):
+            with open(prompt_path, encoding='utf-8') as prompt_file:
+                prompt = prompt_file.read().strip()
+            print(f"RLHFDataset: injecting system prompt from {prompt_path!r}")
+        else:
+            prompt = str(system_prompt).strip()
+            print("RLHFDataset: injecting inline system prompt")
+
+        return prompt or None
+
+    def _prepare_chat(self, chat: list[dict]) -> list[dict]:
+        return _with_system_prompt(chat, self.system_prompt)
 
     def _download(self, use_origin_parquet=False):
         from verl.utils.fs import copy_to_local
@@ -138,8 +167,11 @@ class RLHFDataset(Dataset):
         if self.filter_overlong_prompts:
             tokenizer = self.tokenizer
             prompt_key = self.prompt_key
+            system_prompt = self.system_prompt
             self.dataframe = self.dataframe.filter(
-                lambda doc: len(tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True)
+                lambda doc: len(tokenizer.apply_chat_template(
+                    _with_system_prompt(doc[prompt_key], system_prompt),
+                    add_generation_prompt=True)
                                ) <= self.max_prompt_length,
                 num_proc=self.num_workers,
                 desc=f"Filtering prompts longer than {self.max_prompt_length} tokens")
@@ -164,7 +196,7 @@ class RLHFDataset(Dataset):
         """
         row_dict: dict = self.dataframe[item]
 
-        chat = row_dict.pop(self.prompt_key)
+        chat = self._prepare_chat(row_dict.pop(self.prompt_key))
         
         prompt_with_chat_template = self.tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
 

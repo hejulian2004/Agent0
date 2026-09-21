@@ -230,6 +230,26 @@ class ImagePathTransformer(ast.NodeTransformer):
 
         return self.generic_visit(node)
 
+    def visit_Call(self, node):
+        """Treat a quoted ``"image_path"`` argument as the injected variable.
+
+        Teachers sometimes follow the natural-language name literally and emit
+        ``Image.open("image_path")`` instead of using the provided variable.
+        Rewriting only this exact marker preserves ordinary string arguments
+        while making the documented sandbox interface tolerant of that form.
+        """
+        node = self.generic_visit(node)
+        for index, argument in enumerate(node.args):
+            if isinstance(argument, ast.Constant) and argument.value == 'image_path':
+                node.args[index] = ast.Name(id='image_path', ctx=ast.Load())
+                self.path_was_replaced = True
+        for keyword in node.keywords:
+            argument = keyword.value
+            if isinstance(argument, ast.Constant) and argument.value == 'image_path':
+                keyword.value = ast.Name(id='image_path', ctx=ast.Load())
+                self.path_was_replaced = True
+        return node
+
 
 class CropCoordinateTransformer(ast.NodeTransformer):
     """AST transformer to clamp crop coordinates to image boundaries"""

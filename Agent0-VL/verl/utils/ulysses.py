@@ -271,8 +271,17 @@ def ulysses_pad_and_slice_inputs(input_ids_rmpad: torch.Tensor,
         int: pad size 
     """
     if position_ids_rmpad is not None:
-        assert position_ids_rmpad.size(0) == 1
-        assert input_ids_rmpad.size(1) == position_ids_rmpad.size(1)
+        # Text-only models use [1, seq], while Qwen2-VL/Qwen2.5-VL mRoPE
+        # uses [3, 1, seq]. In both cases sequence is the last dimension.
+        if position_ids_rmpad.dim() == 2:
+            assert position_ids_rmpad.size(0) == 1
+        elif position_ids_rmpad.dim() == 3:
+            assert position_ids_rmpad.size(1) == 1
+        else:
+            raise ValueError(
+                f"Unsupported position_ids shape for Ulysses: {tuple(position_ids_rmpad.shape)}"
+            )
+        assert input_ids_rmpad.size(1) == position_ids_rmpad.size(-1)
     if sp_size <= 1:
         return input_ids_rmpad, position_ids_rmpad, 0
     _, total_seq_len = input_ids_rmpad.shape
@@ -280,11 +289,14 @@ def ulysses_pad_and_slice_inputs(input_ids_rmpad: torch.Tensor,
     if pad_size > 0:
         input_ids_rmpad = torch.nn.functional.pad(input_ids_rmpad, (0, pad_size), value=0)
         if position_ids_rmpad is not None:
-            pad_pos_ids = torch.arange(pad_size, device=position_ids_rmpad.device).unsqueeze(0)
+            pad_shape = list(position_ids_rmpad.shape[:-1]) + [pad_size]
+            pad_pos_ids = torch.arange(pad_size, device=position_ids_rmpad.device)
+            pad_pos_ids = pad_pos_ids.view(*([1] * (position_ids_rmpad.dim() - 1)), pad_size)
+            pad_pos_ids = pad_pos_ids.expand(*pad_shape)
             position_ids_rmpad = torch.cat((position_ids_rmpad, pad_pos_ids), dim=-1)
     input_ids_rmpad = slice_input_tensor(input_ids_rmpad, dim=1, padding=False)
     if position_ids_rmpad is not None:
-        position_ids_rmpad = slice_input_tensor(position_ids_rmpad, dim=1, padding=False)
+        position_ids_rmpad = slice_input_tensor(position_ids_rmpad, dim=-1, padding=False)
     return input_ids_rmpad, position_ids_rmpad, pad_size
 
 

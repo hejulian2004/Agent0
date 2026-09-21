@@ -46,6 +46,13 @@ python3 -m verl.trainer.main_ppo \
     data.max_prompt_length=4096 \
     data.max_response_length=2048 \
     actor_rollout_ref.model.path=$MODEL_PATH \
+    actor_rollout_ref.actor.use_qlora=True \
+    actor_rollout_ref.actor.lora_rank=8 \
+    actor_rollout_ref.actor.lora_alpha=32 \
+    actor_rollout_ref.actor.qlora_4bit_quant_type=nf4 \
+    actor_rollout_ref.actor.qlora_4bit_compute_dtype=bf16 \
+    actor_rollout_ref.actor.qlora_4bit_quant_storage=bf16 \
+    actor_rollout_ref.actor.qlora_4bit_use_double_quant=True \
     actor_rollout_ref.actor.optim.lr=5e-7 \
     actor_rollout_ref.actor.ppo_mini_batch_size=128 \
     actor_rollout_ref.actor.use_kl_loss=True \

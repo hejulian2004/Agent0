@@ -35,6 +35,139 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv('VERL_PPO_LOGGING_LEVEL', 'WARN'))
 
 
+def _normalize_vllm_weight_name(name: str, model) -> str:
+    """Normalize converted Transformers Qwen2.5-VL names for vLLM.
+
+    Recent Transformers versions expose the converted model as
+    model.visual and model.language_model. vLLM 0.8.x consumes the
+    original Hugging Face layout (visual and model) and applies its
+    own mapper afterwards.
+    """
+    # PEFT wraps the base model below ``base_model.model``. vLLM is
+    # initialized from the unwrapped checkpoint, so remove that wrapper.
+    if name.startswith("base_model.model."):
+        name = name[len("base_model.model."):]
+
+    if getattr(getattr(model, 'config', None), 'model_type', None) in ('qwen2_5_vl', 'qwen2_5_vl_text'):
+        if name.startswith('model.visual.'):
+            return name[len('model.'):]
+        if name.startswith('model.language_model.'):
+            return 'language_model.model.' + name[len('model.language_model.'):]
+    return name
+
+
+def _dequantize_bnb_state_dict(params, shape_overrides=None):
+    """Convert bitsandbytes 4-bit entries to dense CPU tensors for vLLM.
+
+    The training actor keeps NF4 weights packed in ``Params4bit`` objects, but
+    vLLM's HF weight loader expects the dense dtype used by the base model.
+    bitsandbytes stores the quantization metadata beside each packed weight in
+    the state dict, so reconstruct the ``QuantState`` before loading vLLM.
+    """
+    quantized_weights = [
+        name for name in params
+        if (name == 'weight' or name.endswith('.weight'))
+        and any(key.startswith(name + '.quant_state.') for key in params)
+    ]
+    if not quantized_weights:
+        return params
+
+    from bitsandbytes.functional import QuantState, dequantize_4bit
+
+    shape_overrides = shape_overrides or {}
+
+    for name in quantized_weights:
+        prefix = name + '.'
+        state_dict = {
+            key[len(prefix):]: value
+            for key, value in params.items()
+            if key.startswith(prefix)
+        }
+        weight = params[name]
+        try:
+            quant_state = QuantState.from_dict(state_dict, device=weight.device)
+            # FSDP can replace the original Params4bit shape with the packed
+            # storage shape. Recover the dense shape from the LoRA factors
+            # before asking bitsandbytes to dequantize the tensor.
+            if name in shape_overrides:
+                quant_state.shape = tuple(shape_overrides[name])
+            dense = dequantize_4bit(weight, quant_state=quant_state)
+        except Exception as exc:
+            raise RuntimeError(f'Failed to dequantize QLoRA weight {name}') from exc
+
+        # QuantState.dtype describes the statistics tensor in some bnb
+        # versions, not the model compute dtype. The Agent0-VL QLoRA profile
+        # uses BF16 for both FSDP storage and vLLM weights.
+        compute_dtype = getattr(quant_state, 'dtype', torch.bfloat16)
+        if compute_dtype not in (torch.float16, torch.bfloat16):
+            compute_dtype = torch.bfloat16
+        params[name] = dense.to(dtype=compute_dtype).contiguous()
+        for key in list(params):
+            if key.startswith(prefix):
+                del params[key]
+
+    return params
+
+
+def _merge_peft_weights_for_vllm(params, module):
+    """Fold in-memory LoRA weights into dense tensors for vLLM.
+
+    The rollout engine is initialized from the base checkpoint and this
+    path does not send a LoRARequest per generation. Fold the adapter into
+    a temporary state dict so vLLM follows the current actor while the
+    training module remains unmerged and trainable.
+    """
+    if not any(".lora_A." in name for name in params):
+        return params
+
+    wrapped = getattr(module, "_fsdp_wrapped_module", module)
+    peft_configs = getattr(wrapped, "peft_config", {})
+    if not isinstance(peft_configs, dict):
+        peft_configs = {}
+
+    for a_name in list(params):
+        if ".lora_A." not in a_name or not a_name.endswith(".weight"):
+            continue
+        prefix, adapter_suffix = a_name.split(".lora_A.", 1)
+        adapter_name = adapter_suffix[:-len(".weight")]
+        b_name = f"{prefix}.lora_B.{adapter_name}.weight"
+        base_name = f"{prefix}.base_layer.weight"
+        if b_name not in params or base_name not in params:
+            continue
+
+        config = peft_configs.get(adapter_name) or peft_configs.get("default")
+        if config is None:
+            continue
+        scaling = float(config.lora_alpha) / float(config.r)
+        base = params[base_name]
+        a = params[a_name].to(dtype=base.dtype)
+        b = params[b_name].to(dtype=base.dtype)
+        delta = torch.matmul(b, a) * scaling
+        if getattr(config, "fan_in_fan_out", False):
+            delta = delta.transpose(0, 1)
+        # FSDP-QLoRA may expose a Params4bit base weight as a flattened
+        # storage tensor even when the LoRA factors retain the original 2-D
+        # shape. Restore the shape before folding the adapter into vLLM.
+        if base.ndim == 1 and base.numel() == delta.numel():
+            base = base.reshape(delta.shape)
+        if base.shape != delta.shape:
+            raise RuntimeError(
+                f"QLoRA/vLLM shape mismatch for {prefix}: "
+                f"base={tuple(base.shape)}, delta={tuple(delta.shape)}")
+        params[f"{prefix}.weight"] = base + delta
+        del params[base_name]
+        del params[a_name]
+        del params[b_name]
+
+    # PEFT also wraps untouched bias parameters as ``base_layer.bias``.
+    # vLLM expects the original dense name for those parameters.
+    for name in list(params):
+        if ".base_layer." in name:
+            params[name.replace(".base_layer.", ".")] = params.pop(name)
+
+    return params
+
+
 class FSDPVLLMShardingManager(BaseShardingManager):
 
     def __init__(self,
@@ -50,14 +183,23 @@ class FSDPVLLMShardingManager(BaseShardingManager):
 
         # Full params
         self.full_params = full_params
+        # vLLMRollout sleeps the engine immediately after construction.
+        # Mark that initial state so the first rollout context wakes it before
+        # loading FSDP weights into vLLM.
+        self._vllm_is_sleeping = True
         if full_params:
-            FSDP.set_state_dict_type(self.module,
-                                     state_dict_type=StateDictType.FULL_STATE_DICT,
-                                     state_dict_config=FullStateDictConfig())
+            FSDP.set_state_dict_type(
+                self.module,
+                state_dict_type=StateDictType.FULL_STATE_DICT,
+                state_dict_config=FullStateDictConfig(
+                    offload_to_cpu=True, rank0_only=False))
         else:
-            FSDP.set_state_dict_type(self.module,
-                                     state_dict_type=StateDictType.SHARDED_STATE_DICT,
-                                     state_dict_config=ShardedStateDictConfig())
+            # Keep only sharded DTensors in the state dict. The iterator below
+            # materializes one full parameter at a time on CPU.
+            FSDP.set_state_dict_type(
+                self.module,
+                state_dict_type=StateDictType.SHARDED_STATE_DICT,
+                state_dict_config=ShardedStateDictConfig())
 
         self.tp_size = vllm_ps.get_tensor_model_parallel_world_size()
         self.tp_rank = vllm_ps.get_tensor_model_parallel_rank()
@@ -92,16 +234,57 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         if vllm_version in ('0.4.2', '0.5.4', '0.6.3'):
             self.inference_engine.sync_model_weights(params, load_format=load_format)
         else:
-            self.inference_engine.wake_up()
+            # Move FSDP state tensors off GPU before vLLM remaps its full model.
+            world_size = torch.distributed.get_world_size()
+            for name in list(params.keys()):
+                param = params[name]
+                if world_size != 1 and hasattr(param, "full_tensor"):
+                    param = param.full_tensor()
+                if isinstance(param, torch.Tensor):
+                    param = param.detach().to(device="cpu").contiguous()
+                params[name] = param
+                del param
+            shape_overrides = {}
+            for a_name in params:
+                if ".lora_A." not in a_name or not a_name.endswith(".weight"):
+                    continue
+                prefix, adapter_suffix = a_name.split(".lora_A.", 1)
+                adapter_name = adapter_suffix[:-len(".weight")]
+                b_name = f"{prefix}.lora_B.{adapter_name}.weight"
+                base_name = f"{prefix}.base_layer.weight"
+                if b_name in params and base_name in params:
+                    shape_overrides[base_name] = (
+                        params[b_name].shape[0], params[a_name].shape[1])
+            params = _dequantize_bnb_state_dict(params, shape_overrides)
+            params = _merge_peft_weights_for_vllm(params, self.module)
+            torch.cuda.empty_cache()
+
+            # With manual FSDP param offload, keep the training actor on CPU
+            # while vLLM is resident. This is safe after state_dict() has
+            # materialized the tensors above and avoids a second full model
+            # competing for GPU memory during wake_up().
+            from verl.utils.fsdp_utils import offload_fsdp_model_to_cpu
+            offload_fsdp_model_to_cpu(self.module)
+
+            if self._vllm_is_sleeping:
+                self.inference_engine.wake_up()
+                self._vllm_is_sleeping = False
             world_size = torch.distributed.get_world_size()
             model = self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
+            def iter_vllm_weights():
+                for name, param in params.items():
+                    name = _normalize_vllm_weight_name(name, model)
+                    if world_size != 1 and hasattr(param, 'full_tensor'):
+                        param = param.full_tensor()
+                    if isinstance(param, torch.Tensor):
+                        param = param.detach().to(device='cpu').contiguous()
+                    yield name, param
+
             if model.config.architectures[0] in ['DeepseekV2ForCausalLM', 'DeepseekV3ForCausalLM']:
                 loaded_params = patched_ds_v3_load_weights(
-                    model, ((name, param.full_tensor() if world_size != 1 and hasattr(param, 'full_tensor') else param)
-                            for name, param in params.items()))
+                    model, iter_vllm_weights())
             else:
-                loaded_params = model.load_weights(
-                    ((name, param.full_tensor() if world_size != 1 else param) for name, param in params.items()))
+                loaded_params = model.load_weights(iter_vllm_weights())
             logger.info(f"vLLM load weights, loaded_params: {len(loaded_params)}")
 
         log_gpu_memory_usage('After sync model weights in sharding manager', logger=logger)
@@ -127,6 +310,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             self.inference_engine.offload_model_weights()
         else:
             self.inference_engine.sleep(level=1)
+            self._vllm_is_sleeping = True
         log_gpu_memory_usage('After vllm offload in sharding manager', logger=logger)
 
         # self.module.to('cuda')

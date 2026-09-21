@@ -143,6 +143,31 @@ class vLLMAgent0Rollout(vLLMRollout):
 
         super().__init__(model_path, config, tokenizer, model_hf_config, **kwargs)
 
+        # Qwen checkpoints pad the language-model head to an aligned size
+        # (152064 here), while the tokenizer only defines ids through 151664.
+        # Without an allow-list, vLLM can sample one of the padded rows during
+        # free-running RL generation. The invalid id is only noticed when the
+        # next SERC turn feeds that response back into vLLM, producing
+        # ``Token id ... is out of vocabulary``. Keep the padded weights for
+        # checkpoint compatibility, but never sample those ids.
+        tokenizer_vocab = tokenizer.get_vocab()
+        valid_vocab_size = max(tokenizer_vocab.values(), default=-1) + 1
+        text_config = getattr(model_hf_config, 'text_config', None)
+        vocab_config = text_config if text_config is not None else model_hf_config
+        model_vocab_size = int(getattr(vocab_config, 'vocab_size', valid_vocab_size))
+        if valid_vocab_size < model_vocab_size:
+            if not hasattr(self.sampling_params, 'allowed_token_ids'):
+                raise RuntimeError(
+                    'This vLLM version does not support allowed_token_ids; '
+                    'cannot safely sample from a padded Qwen vocabulary.'
+                )
+            self.sampling_params.allowed_token_ids = list(range(valid_vocab_size))
+            print(
+                'Agent0-VL rollout: masked padded vocabulary ids '
+                f'{valid_vocab_size}:{model_vocab_size - 1} '
+                f'(tokenizer_vocab={valid_vocab_size}, model_vocab={model_vocab_size})'
+            )
+
         self.tokenizer = tokenizer
         self._load_prompt_templates()
 
@@ -633,9 +658,10 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
             active_samples = [g for g in active_samples if final_answers[g] is None]
 
         # === Finalize outputs ===
-        max_response_len = max(max(current_positions), 1) if current_positions else 1
-        # pad to multiple of 8 for kernel friendliness
-        max_response_len = min(max_total_length, (max_response_len + 7) // 8 * 8)
+        # Keep the output shape identical across DP workers. Local samples
+        # can finish at different points, so trimming to the local maximum
+        # would make DataProto.concat fail across GPUs.
+        max_response_len = max_total_length
         combined_response = combined_response[:, :max_response_len]
         multiturn_mask = multiturn_mask[:, :max_response_len]
         response_attention_mask = response_attention_mask[:, :max_response_len]
@@ -664,11 +690,12 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
             self.inference_engine.free_cache_engine()
 
         # Non-tensor outputs. Everything is already repeated to batch_size.
-        max_verify_len = max((len(vp) for vp in verify_probs), default=0)
-        max_verify_len = max(max_verify_len, 1)
-        verify_probs_array = np.zeros((batch_size, max_verify_len), dtype=np.float32)
+        # Verification can stop at different SERC turns per sample. Keep
+        # each sample's probability history as one object so DP workers can
+        # concatenate batches with different second-axis lengths.
+        verify_probs_array = np.empty(batch_size, dtype=object)
         for i, vp in enumerate(verify_probs):
-            verify_probs_array[i, :len(vp)] = vp
+            verify_probs_array[i] = np.asarray(vp, dtype=np.float32)
 
         step_data_array = np.empty(batch_size, dtype=object)
         for i in range(batch_size):

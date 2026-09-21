@@ -107,10 +107,14 @@ class DataParallelPPOActor(BasePPOActor):
                 input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)  # ((total_nnz / sp) + pad)
 
                 # only pass input_ids and position_ids to enable flash_attn_varlen
+                model_kwargs = {}
+                if self.use_ulysses_sp and multi_modal_inputs:
+                    model_kwargs["_verl_ulysses_sharded_multimodal"] = True
                 output = self.actor_module(input_ids=input_ids_rmpad,
                                            attention_mask=None,
                                            position_ids=position_ids_rmpad,
                                            **multi_modal_inputs,
+                                           **model_kwargs,
                                            use_cache=False)  # prevent model thinks we are generating
                 logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
 
@@ -225,7 +229,7 @@ class DataParallelPPOActor(BasePPOActor):
             log_probs_lst.append(log_probs)
         log_probs = torch.concat(log_probs_lst, dim=0)
 
-        if use_dynamic_bsz:
+        if use_dynamic_bsz and not has_multi_modal_inputs:
             indices = list(itertools.chain.from_iterable(indices))
             assert len(indices) == log_probs.size(0), f"{len(indices)} vs. {log_probs.size()}"
             revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)

@@ -148,13 +148,15 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True, max_singletu
         turn_lengths = turn_mask.sum(dim=1).float()  # (batch_size,)
         pos_indices = torch.arange(multiturn_mask.size(1), device=multiturn_mask.device).unsqueeze(0).expand_as(multiturn_mask)
         last_pos = torch.max(torch.where(turn_mask, pos_indices, torch.zeros_like(pos_indices)), dim=1)[0]
-        eos_value_indices = torch.clamp(last_pos + 1, 0, values.size(1) - 1)
-        turn_values = torch.masked_select(values, turn_mask)
-        turn_eos_value = torch.gather(values, dim=1, index=eos_value_indices.unsqueeze(1))
+        if use_critic:
+            eos_value_indices = torch.clamp(last_pos + 1, 0, values.size(1) - 1)
+            turn_values = torch.masked_select(values, turn_mask)
+            turn_eos_value = torch.gather(values, dim=1, index=eos_value_indices.unsqueeze(1))
 
         valid_mask = turn_lengths > 0
         turn_lengths = turn_lengths[valid_mask]
-        turn_eos_value = turn_eos_value[valid_mask]
+        if use_critic:
+            turn_eos_value = turn_eos_value[valid_mask]
         
         # 只计算至少有一个样本存在此轮对话的情况
         if turn_lengths.sum() > 0:
@@ -168,17 +170,19 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True, max_singletu
                     torch.eq(turn_lengths, max_singleturn_resp_length).float()
                 ).detach().item(),
             }
-            values_metrics = {
-                f'critic/turn{turn}_eos_value/mean': torch.mean(turn_eos_value).detach().item(),
-                f'critic/turn{turn}_eos_value/max': torch.max(turn_eos_value).detach().item(),
-                f'critic/turn{turn}_eos_value/min': torch.min(turn_eos_value).detach().item(),
-                f'critic/turn{turn}_values/min': torch.min(turn_values).detach().item(),
-                f'critic/turn{turn}_values/max': torch.max(turn_values).detach().item(),
-                f'critic/turn{turn}_values/mean': torch.mean(turn_values).detach().item(),
-            }
+            if use_critic:
+                values_metrics = {
+                    f'critic/turn{turn}_eos_value/mean': torch.mean(turn_eos_value).detach().item(),
+                    f'critic/turn{turn}_eos_value/max': torch.max(turn_eos_value).detach().item(),
+                    f'critic/turn{turn}_eos_value/min': torch.min(turn_eos_value).detach().item(),
+                    f'critic/turn{turn}_values/min': torch.min(turn_values).detach().item(),
+                    f'critic/turn{turn}_values/max': torch.max(turn_values).detach().item(),
+                    f'critic/turn{turn}_values/mean': torch.mean(turn_values).detach().item(),
+                }
             
             metrics.update(turn_metrics)
-            metrics.update(values_metrics)
+            if use_critic:
+                metrics.update(values_metrics)
     
     return metrics
 

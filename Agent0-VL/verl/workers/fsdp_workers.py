@@ -68,6 +68,41 @@ def get_sharding_strategy(device_mesh):
     return sharding_strategy
 
 
+
+
+def restore_qwen25vl_rope_scaling(model_config):
+    """Bridge Transformers 4.57 config migration for Qwen2.5-VL mRoPE."""
+    text_config = getattr(model_config, "text_config", None)
+    if text_config is None or getattr(text_config, "rope_scaling", None) is not None:
+        return
+    rope_parameters = getattr(text_config, "rope_parameters", None)
+    if not isinstance(rope_parameters, dict) or "mrope_section" not in rope_parameters:
+        return
+    rope_scaling = dict(rope_parameters)
+    rope_scaling.setdefault("rope_type", rope_scaling.get("type", "default"))
+    text_config.rope_scaling = rope_scaling
+    logger.info("Restored Qwen2.5-VL text_config.rope_scaling from rope_parameters")
+
+
+
+def _to_regular_config_value(value):
+    """Convert an OmegaConf value to a PEFT-friendly Python value."""
+    from omegaconf import DictConfig, ListConfig, OmegaConf
+
+    if isinstance(value, (DictConfig, ListConfig)):
+        return OmegaConf.to_container(value, resolve=True)
+    return value
+
+
+def _qlora_dtype(value, default):
+    """Resolve a QLoRA dtype from either a config string or a torch dtype."""
+    from verl.utils.torch_dtypes import PrecisionType
+
+    if value is None:
+        value = default
+    return PrecisionType.to_dtype(value)
+
+
 class ActorRolloutRefWorker(Worker):
     """
     This worker can be instantiated as a standalone actor or a standalone rollout or a standalone reference policy
@@ -151,7 +186,7 @@ class ActorRolloutRefWorker(Worker):
                                role='actor'):
         from verl.utils.model import print_model_size, update_model_config, get_generation_config
         from verl.utils.torch_dtypes import PrecisionType
-        from transformers import AutoModelForCausalLM, AutoConfig, AutoModelForVision2Seq
+        from transformers import AutoModelForCausalLM, AutoConfig, AutoModelForVision2Seq, BitsAndBytesConfig
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy, MixedPrecision, CPUOffload
         from torch import optim
 
@@ -171,6 +206,35 @@ class ActorRolloutRefWorker(Worker):
         else:
             torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
+        lora_rank = int(self.config.actor.get("lora_rank", 0)) if role == "actor" else 0
+        use_qlora = bool(self.config.actor.get("use_qlora", False)) if role == "actor" else False
+        quantization_config = None
+        if use_qlora:
+            if lora_rank <= 0:
+                raise ValueError("actor.use_qlora=True requires actor.lora_rank > 0")
+            qlora_compute_dtype = _qlora_dtype(
+                self.config.actor.get("qlora_4bit_compute_dtype", "bf16"), "bf16")
+            qlora_storage_dtype = _qlora_dtype(
+                self.config.actor.get("qlora_4bit_quant_storage", "bf16"), "bf16")
+            torch_dtype = qlora_compute_dtype
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type=str(
+                    self.config.actor.get("qlora_4bit_quant_type", "nf4")),
+                bnb_4bit_compute_dtype=qlora_compute_dtype,
+                bnb_4bit_use_double_quant=bool(
+                    self.config.actor.get("qlora_4bit_use_double_quant", True)),
+                # FSDP-QLoRA needs a floating-point quantization storage dtype
+                # so the packed weights can be sharded by FSDP.
+                bnb_4bit_quant_storage=qlora_storage_dtype,
+            )
+            if self.rank == 0:
+                print(
+                    "QLoRA enabled: 4-bit "
+                    f"{quantization_config.bnb_4bit_quant_type.upper()} weights, "
+                    f"compute={qlora_compute_dtype}, storage={qlora_storage_dtype}, "
+                    f"double_quant={quantization_config.bnb_4bit_use_double_quant}")
+
         # override model kwargs
         actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
 
@@ -183,12 +247,18 @@ class ActorRolloutRefWorker(Worker):
         }
         override_config_kwargs.update(override_model_config)
         update_model_config(actor_model_config, override_config_kwargs=override_config_kwargs)
+        restore_qwen25vl_rope_scaling(actor_model_config)
         if self.rank == 0:
             print(f'Model config after override: {actor_model_config}')
 
-        # NOTE(fix me): tie_word_embedding causes meta_tensor init to hang
-        init_context = get_init_weight_context_manager(use_meta_tensor=not actor_model_config.tie_word_embeddings,
-                                                       mesh=self.device_mesh)
+        # NOTE(fix me): tie_word_embedding causes meta_tensor init to hang.
+        # Transformers' 4-bit quantizer dispatches directly to the current
+        # process GPU; combining that with meta tensors makes rank>0 fail when
+        # Accelerate calls model.to(device). Load each QLoRA rank concretely,
+        # then let FSDP shard the already-quantized module.
+        init_context = get_init_weight_context_manager(
+            use_meta_tensor=not use_qlora and not actor_model_config.tie_word_embeddings,
+            mesh=self.device_mesh)
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -197,11 +267,16 @@ class ActorRolloutRefWorker(Worker):
             else:
                 actor_module_class = AutoModelForCausalLM
 
-            actor_module = actor_module_class.from_pretrained(pretrained_model_name_or_path=local_path,
-                                                              torch_dtype=torch_dtype,
-                                                              config=actor_model_config,
-                                                              attn_implementation='flash_attention_2',
-                                                              trust_remote_code=trust_remote_code)
+            model_kwargs = dict(
+                pretrained_model_name_or_path=local_path,
+                torch_dtype=torch_dtype,
+                config=actor_model_config,
+                attn_implementation='flash_attention_2',
+                trust_remote_code=trust_remote_code,
+            )
+            if quantization_config is not None:
+                model_kwargs['quantization_config'] = quantization_config
+            actor_module = actor_module_class.from_pretrained(**model_kwargs)
 
             if use_remove_padding or self.ulysses_sequence_parallel_size > 1:
                 from verl.models.transformers.monkey_patch import apply_monkey_patch
@@ -212,11 +287,57 @@ class ActorRolloutRefWorker(Worker):
                 from liger_kernel.transformers.monkey_patch import _apply_liger_kernel_to_instance
                 _apply_liger_kernel_to_instance(model=actor_module)
 
-            # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
-            actor_module.to(torch_dtype)
+            # Quantized modules manage their own Params4bit device/dtype state;
+            # calling .to(dtype) on the complete QLoRA model would destroy that
+            # state. Non-quantized models retain the original VERL behavior.
+            if not use_qlora:
+                # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
+                actor_module.to(torch_dtype)
+
+            # RL can use the same PEFT path as SFT when full-parameter
+            # optimization does not fit the available GPUs. The reference
+            # policy remains a frozen base model; only the actor gets LoRA.
+            if use_qlora:
+                from peft import prepare_model_for_kbit_training
+
+                actor_module = prepare_model_for_kbit_training(
+                    actor_module,
+                    use_gradient_checkpointing=enable_gradient_checkpointing,
+                    gradient_checkpointing_kwargs={'use_reentrant': False},
+                )
+
+            if lora_rank > 0:
+                from peft import LoraConfig, TaskType, get_peft_model
+
+                if not use_qlora:
+                    actor_module.enable_input_require_grads()
+                lora_config = LoraConfig(
+                    task_type=TaskType.CAUSAL_LM,
+                    r=lora_rank,
+                    lora_alpha=int(self.config.actor.get("lora_alpha", 16)),
+                    target_modules=_to_regular_config_value(
+                        self.config.actor.get("target_modules", "all-linear")),
+                    bias="none",
+                )
+                actor_module = get_peft_model(actor_module, lora_config)
+                if use_qlora:
+                    # prepare_model_for_kbit_training intentionally promotes
+                    # LayerNorm/lm_head to FP32. FSDP cannot flatten a QLoRA
+                    # transformer block containing both FP32 parameters and
+                    # BF16 Params4bit storage, so keep all non-quantized actor
+                    # parameters in the configured BF16 compute dtype.
+                    for parameter in actor_module.parameters():
+                        if (parameter.dtype.is_floating_point
+                                and parameter.dtype != torch_dtype
+                                and parameter.__class__.__name__ != 'Params4bit'):
+                            parameter.data = parameter.data.to(torch_dtype)
+                if self.rank == 0:
+                    actor_module.print_trainable_parameters()
 
             if enable_gradient_checkpointing:
-                actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
+                if not use_qlora:
+                    actor_module.gradient_checkpointing_enable(
+                        gradient_checkpointing_kwargs={'use_reentrant': False})
         torch.distributed.barrier()
 
         if self.rank == 0:
@@ -237,7 +358,11 @@ class ActorRolloutRefWorker(Worker):
 
         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
 
-        auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get('wrap_policy', None))
+        auto_wrap_policy = get_fsdp_wrap_policy(
+            module=actor_module,
+            config=fsdp_config.get('wrap_policy', None),
+            is_lora=lora_rank > 0,
+        )
 
         if self._is_rollout and self.config.rollout.name == 'hf':
             # TODO(zhangchi.usc1992, shengguangming) fix me. Current, auto_wrap_policy causes HFRollout to hang in Gemma
@@ -251,12 +376,15 @@ class ActorRolloutRefWorker(Worker):
         # TODO: add transformer policy
         # We force reference policy to use CPUOffload to save memory.
         # We force turn off CPUOffload for actor because it causes incorrect results when using grad accumulation
-        cpu_offload = None if role == 'actor' else CPUOffload(offload_params=True)
+        cpu_offload = CPUOffload(offload_params=True) if (role != 'actor' or fsdp_config.get('cpu_offload', False)) else None
         actor_module_fsdp = FSDP(
             actor_module,
             cpu_offload=cpu_offload,
             param_init_fn=init_fn,
-            use_orig_params=False,
+            # FSDP must preserve the original Params4bit views for QLoRA;
+            # flattening them loses the dense shape/quantization metadata that
+            # is needed when synchronizing the actor into vLLM.
+            use_orig_params=use_qlora,
             auto_wrap_policy=auto_wrap_policy,
             device_id=torch.cuda.current_device(),
             sharding_strategy=sharding_strategy,  # zero3
@@ -427,6 +555,11 @@ class ActorRolloutRefWorker(Worker):
             if self._is_offload_optimizer:
                 offload_fsdp_optimizer(optimizer=self.actor_optimizer)
                 log_gpu_memory_usage('After offload actor optimizer during init', logger=logger)
+            # Keep manually-offloaded actor parameters on CPU while vLLM is
+            # constructed. The actor is brought to GPU only for log-prob and
+            # policy-update calls; this avoids holding two full models on GPU.
+            if self._is_offload_param:
+                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
         # load from checkpoint
         if self._is_actor:
             OmegaConf.set_struct(self.config.actor, True)
@@ -516,6 +649,9 @@ class ActorRolloutRefWorker(Worker):
         prompts = prompts.to(torch.cuda.current_device())
 
         assert self._is_rollout
+        # The FSDP state dict requires the actor parameters on the compute
+        # device. The sharding manager offloads them again after copying the
+        # state dict to CPU, before vLLM wakes up.
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
