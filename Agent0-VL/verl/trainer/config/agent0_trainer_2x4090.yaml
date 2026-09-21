@@ -23,7 +23,9 @@ actor_rollout_ref:
 
   rollout:
     tensor_model_parallel_size: 2
-    gpu_memory_utilization: 0.50
+    # The BF16 TP=2 vLLM weights use about 12.2--12.5 GiB per 4090;
+    # 0.50 leaves no KV-cache block, while 0.65 initialized successfully.
+    gpu_memory_utilization: 0.65
     enforce_eager: True
     free_cache_engine: True
     load_format: dummy_hf
