@@ -175,11 +175,13 @@ class FSDPVLLMShardingManager(BaseShardingManager):
                  inference_engine: LLM,
                  model_config,
                  full_params: bool = False,
-                 device_mesh: DeviceMesh = None):
+                 device_mesh: DeviceMesh = None,
+                 offload_actor: bool = False):
         self.module = module
         self.inference_engine = inference_engine
         self.model_config = model_config
         self.device_mesh = device_mesh
+        self.offload_actor = offload_actor
 
         # Full params
         self.full_params = full_params
@@ -262,9 +264,12 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             # With manual FSDP param offload, keep the training actor on CPU
             # while vLLM is resident. This is safe after state_dict() has
             # materialized the tensors above and avoids a second full model
-            # competing for GPU memory during wake_up().
-            from verl.utils.fsdp_utils import offload_fsdp_model_to_cpu
-            offload_fsdp_model_to_cpu(self.module)
+            # competing for GPU memory during wake_up(). The worker owns this
+            # policy; do not change the actor placement for profiles that do
+            # not request manual parameter offload.
+            if self.offload_actor:
+                from verl.utils.fsdp_utils import offload_fsdp_model_to_cpu
+                offload_fsdp_model_to_cpu(self.module)
 
             if self._vllm_is_sleeping:
                 self.inference_engine.wake_up()

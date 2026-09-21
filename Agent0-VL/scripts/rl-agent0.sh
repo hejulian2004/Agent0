@@ -31,6 +31,7 @@ CKPT_PATH=${CKPT_PATH:-checkpoints}
 MODEL_PATH=${MODEL_PATH:-Qwen/Qwen2.5-VL-7B-Instruct}
 ITERATION=${ITERATION:-1}
 EXPERIMENT_NAME="agent0_vl_serc_iter${ITERATION}"
+CONFIG_NAME=${CONFIG_NAME:-agent0_trainer}
 
 # GRPO group size (paper: N=8)
 n=8
@@ -38,13 +39,10 @@ n=8
 export PYTHONPATH="${PWD}:${PYTHONPATH}"
 
 python3 -m verl.trainer.main_ppo \
-    --config-name=agent0_trainer \
+    --config-name=$CONFIG_NAME \
     algorithm.adv_estimator=grpo \
     data.train_files=$train_data \
     data.val_files=$val_data \
-    data.train_batch_size=256 \
-    data.max_prompt_length=4096 \
-    data.max_response_length=2048 \
     actor_rollout_ref.model.path=$MODEL_PATH \
     actor_rollout_ref.actor.use_qlora=True \
     actor_rollout_ref.actor.lora_rank=8 \
@@ -54,7 +52,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.qlora_4bit_quant_storage=bf16 \
     actor_rollout_ref.actor.qlora_4bit_use_double_quant=True \
     actor_rollout_ref.actor.optim.lr=5e-7 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=128 \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.entropy_coeff=0.01 \
@@ -65,8 +62,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.enable_tool_execution=True \
     actor_rollout_ref.rollout.enable_verification=True \
     actor_rollout_ref.rollout.enable_self_repair=True \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     reward_model.reward_manager=agent0 \
     reward_model.lambda_tool=0.3 \
     reward_model.alpha_out=1.0 \

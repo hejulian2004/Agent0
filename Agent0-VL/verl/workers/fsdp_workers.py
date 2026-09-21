@@ -490,7 +490,8 @@ class ActorRolloutRefWorker(Worker):
                                                                inference_engine=rollout.inference_engine,
                                                                model_config=self.actor_model_config,
                                                                full_params='hf' in self.config.rollout.load_format,
-                                                               device_mesh=rollout_device_mesh)
+                                                               device_mesh=rollout_device_mesh,
+                                                               offload_actor=self._is_offload_param)
             log_gpu_memory_usage('After building sharding manager', logger=None)
 
         elif rollout_name == 'sglang':
@@ -666,9 +667,9 @@ class ActorRolloutRefWorker(Worker):
         prompts.meta_info.update(meta_info)
         with self.rollout_sharding_manager:
 
-            # after parameters sync with rollout, offload actor model to CPU
-            if self._is_offload_param:
-                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+            # The sharding manager offloads the actor after materializing and
+            # synchronizing its state dict, before vLLM wakes up. Keeping that
+            # ownership in one place avoids a second actor offload here.
             if self._is_offload_optimizer:
                 offload_fsdp_optimizer(optimizer=self.actor_optimizer)
 
