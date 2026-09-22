@@ -600,8 +600,10 @@ class ActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self, data: DataProto):
-        # Support all hardwares
-        data = data.to(torch.cuda.current_device())
+        # Keep the complete training batch on CPU. ``update_policy`` moves only
+        # the current micro-batch to the actor device before its forward pass.
+        # Moving the complete DataProto here duplicates the batch on GPU before
+        # PPO's dynamic/micro-batch splitting and can trigger OOM in backward.
 
         assert self._is_actor
         if self._is_offload_param:
