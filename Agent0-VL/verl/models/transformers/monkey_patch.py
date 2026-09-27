@@ -182,7 +182,12 @@ def apply_monkey_patch(model: PreTrainedModel, ulysses_sp_size: int):
     """Replace _flash_attention_forward to _ulysses_flash_attention_forward"""
     module = sys.modules[model.__module__]
 
-    num_attention_heads, num_key_value_heads = model.config.num_attention_heads, model.config.num_key_value_heads
+    # Transformers 5 stores Qwen2.5-VL language-model attention settings in
+    # ``config.text_config`` instead of exposing them on the multimodal root
+    # config. Older Transformers/model configs keep these fields at the root.
+    attention_config = getattr(model.config, "text_config", None) or model.config
+    num_attention_heads = attention_config.num_attention_heads
+    num_key_value_heads = attention_config.num_key_value_heads
     assert num_attention_heads % ulysses_sp_size == 0, \
         f"num_attention_heads {num_attention_heads} must be divisible by ulysses_sp_size {ulysses_sp_size}"
     assert num_key_value_heads % ulysses_sp_size == 0 or ulysses_sp_size % num_key_value_heads == 0, (

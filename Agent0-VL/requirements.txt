@@ -1,9 +1,11 @@
 # requirements.txt records the full set of dependencies for development
 
 # Core ML frameworks
-# NOTE: vLLM 0.8.2 (used for rollout/eval) requires torch 2.6.x; install torch
-# to match your vLLM build (see README). transformers >= 4.49 is required for
-# the Qwen2.5-VL (Qwen2_5_VL) model classes used throughout.
+# The validated GPU RL environment uses vLLM 0.29.0 with torch 2.13.0/cu130,
+# transformers 5.17.0, and BF16 Qwen2.5-VL. Install the GPU-only packages in a
+# virtualenv after selecting the appropriate CUDA build; this file remains
+# usable for CPU-only development because vLLM is intentionally commented out.
+# transformers >= 4.49 is required for the Qwen2.5-VL model classes.
 torch>=2.4.0
 transformers>=4.49.0
 accelerate>=0.25.0
@@ -20,8 +22,10 @@ qwen-vl-utils>=0.0.2
 
 # vLLM for efficient inference (required for RL rollout and evaluation;
 # commented out so CPU-only dev installs succeed — install on GPU machines).
-# vllm 0.8.2 pulls in torch 2.6.x; keep torch aligned with the vLLM build.
-# vllm==0.8.2
+# The current validated GPU profile is vLLM 0.29.0. Its wheel pulls the
+# matching torch/CUDA 13 runtime packages; do not install a second system CUDA
+# toolkit or change the host driver.
+# vllm==0.29.0
 
 # HTTP sandbox client (only needed when SANDBOX_ENDPOINT is used;
 # the default subprocess sandbox has no extra dependencies)

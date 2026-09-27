@@ -16,7 +16,14 @@ import torch
 from torch import nn
 from typing import Optional, Union, Iterable, Tuple, Set
 from transformers import PretrainedConfig
-from vllm.model_executor.layers.fused_moe import FusedMoE
+try:
+    # vLLM <= 0.8 exposed the legacy FusedMoE class from this package.
+    from vllm.model_executor.layers.fused_moe import FusedMoE as _LegacyFusedMoE
+except ImportError:
+    # vLLM >= 0.9 replaced the class entry point with a function and added the
+    # model argument needed to account for LoRA/base-layer prefixes.
+    from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
+    _LegacyFusedMoE = None
 from vllm.model_executor.model_loader.weight_utils import (default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.utils import is_pp_missing_parameter
 
@@ -45,10 +52,19 @@ def patched_ds_v3_load_weights(model: nn.Module, weights: Iterable[Tuple[str, to
         ("gate_up_proj", "up_proj", 1),
     ]
 
-    expert_params_mapping = FusedMoE.make_expert_params_mapping(ckpt_gate_proj_name="gate_proj",
-                                                                ckpt_down_proj_name="down_proj",
-                                                                ckpt_up_proj_name="up_proj",
-                                                                num_experts=model.config.n_routed_experts)
+    if _LegacyFusedMoE is not None:
+        expert_params_mapping = _LegacyFusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=model.config.n_routed_experts)
+    else:
+        expert_params_mapping = fused_moe_make_expert_params_mapping(
+            model=model,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=model.config.n_routed_experts)
     params_dict = dict(model.named_parameters())
     loaded_params: Set[str] = set()
 

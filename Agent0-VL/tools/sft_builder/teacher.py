@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -33,7 +34,7 @@ class TeacherConfig:
     api_key_env: str = "OPENAI_API_KEY"
     temperature: float = 0.7
     top_p: float = 0.95
-    max_tokens: int = 2048
+    max_tokens: int = 8192
     timeout: float = 120.0
     retries: int = 2
 
@@ -119,6 +120,10 @@ def _response_text(data: Mapping[str, Any]) -> str:
         content = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
         raise TeacherError(f"Teacher response has no choices[0].message.content: {data}") from exc
+    if content is None or (isinstance(content, str) and not content.strip()):
+        raise TeacherError("Teacher returned empty public content; check thinking mode and token budget")
+    if data.get("choices", [{}])[0].get("finish_reason") == "length":
+        raise TeacherError("Teacher response hit the token limit; truncated trajectories are not accepted")
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -143,7 +148,7 @@ class OpenAICompatibleTeacher:
         api_key_env: str = "OPENAI_API_KEY",
         temperature: float = 0.7,
         top_p: float = 0.95,
-        max_tokens: int = 2048,
+        max_tokens: int = 8192,
         timeout: float = 120.0,
         retries: int = 2,
     ) -> None:
@@ -176,6 +181,11 @@ class OpenAICompatibleTeacher:
             "top_p": self.config.top_p,
             "max_tokens": self.config.max_tokens,
         }
+        # Qwen3's default hidden thinking can consume the entire budget while
+        # public content is empty. Keep reasoning/tool turns in public content;
+        # the released system/user prompts are unchanged.
+        if self.config.model.lower().startswith("qwen3"):
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             _endpoint(self.config.base_url),
@@ -201,6 +211,20 @@ class OpenAICompatibleTeacher:
                 break
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="replace")[:2000]
+                context = re.search(r"maximum context length is (\d+) tokens.*?(?:contains at least|contains) (\d+) input tokens", detail, re.DOTALL)
+                if exc.code == 400 and context and attempt < self.config.retries:
+                    limit, input_tokens = map(int, context.groups())
+                    available = limit - input_tokens - 256
+                    if available < 256:
+                        raise TeacherError("Teacher context exhausted; less than 256 output tokens remain") from exc
+                    new_budget = min(payload["max_tokens"] // 2, available)
+                    if new_budget < 256:
+                        raise TeacherError("Teacher context exhausted at minimum output budget") from exc
+                    logging.getLogger(__name__).warning(
+                        "Teacher context budget adjusted: input_tokens=%s max_tokens=%s -> %s", input_tokens, payload["max_tokens"], new_budget)
+                    payload["max_tokens"] = new_budget
+                    request.data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                    continue
                 if 500 <= exc.code < 600 and attempt < self.config.retries:
                     last_error = f"HTTP {exc.code}: {detail}"
                 else:

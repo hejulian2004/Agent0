@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from importlib.metadata import version, PackageNotFoundError
+from packaging import version as packaging_version
 
 ###
 # [SUPPORT AMD:]
@@ -42,7 +43,7 @@ if _is_amd and package_version is not None:
     package_version = re.match(r'(\d+\.\d+\.?\d*)', package_version).group(1)
 ###
 
-if package_version is not None and package_version <= '0.6.3':
+if package_version is not None and packaging_version.parse(package_version) <= packaging_version.parse('0.6.3'):
     vllm_mode = 'customized'
     from .vllm_rollout import vLLMRollout
     from .fire_vllm_rollout import FIREvLLMRollout

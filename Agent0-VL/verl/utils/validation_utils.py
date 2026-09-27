@@ -68,6 +68,15 @@ def save_validation_results_to_json(data_sources: List[str],
                     sample_data["response"] = var_vals[sample_idx]
                 elif var_name == "genrm_score":
                     sample_data["genrm_score"] = var_vals[sample_idx]
+                elif var_name in {
+                    "num_steps", "num_repairs", "total_return",
+                    "tool_call_count", "successful_tool_calls",
+                    "verifier_trigger_count", "verifier_call_count",
+                    "valid_verifier_calls", "repair_trigger_count",
+                    "repair_applied_count", "repair_success_count",
+                    "repair_score_improvement_count",
+                }:
+                    sample_data[var_name] = var_vals[sample_idx]
         
         # 将样本数据添加到对应提示的列表中
         if sample_data:

@@ -38,7 +38,8 @@ from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
 from verl.workers.rollout.base import BaseRollout
 from vllm.distributed import parallel_state as vllm_ps
 from vllm import LLM, SamplingParams
-from verl.third_party.vllm import vllm_version
+from verl.third_party.vllm import vllm_mm_cache_kwargs, vllm_version
+from verl.workers.rollout.vllm_rollout.vllm_rollout_spmd import get_model_max_position_embeddings
 
 # TODO
 # 1. support pp in vllm
@@ -94,7 +95,8 @@ class EvalGenrmRollout(BaseRollout):
             vllm_ps.initialize_parallel_state(tensor_model_parallel_size=tensor_parallel_size,
                                               num_tp_per_train_tp=num_tp_per_train_tp)
 
-        assert model_hf_config.max_position_embeddings >= config.prompt_length + config.response_length, \
+        model_max_position_embeddings = get_model_max_position_embeddings(model_hf_config)
+        assert model_max_position_embeddings >= config.prompt_length + config.response_length, \
             "model context length should be greater than total sequence length"
 
         max_model_len = self.config.max_model_len if self.config.max_model_len \
@@ -117,7 +119,6 @@ class EvalGenrmRollout(BaseRollout):
             enforce_eager=config.enforce_eager,
             gpu_memory_utilization=config.gpu_memory_utilization,
             disable_custom_all_reduce=True,
-            disable_mm_preprocessor_cache=True,
             skip_tokenizer_init=False,
             max_model_len=max_model_len,
             load_format=load_format,
@@ -126,6 +127,7 @@ class EvalGenrmRollout(BaseRollout):
             enable_chunked_prefill=config.enable_chunked_prefill,
             enable_prefix_caching=True,
             trust_remote_code=trust_remote_code,
+            **vllm_mm_cache_kwargs(),
         )
 
         # Offload vllm model to reduce peak memory usage

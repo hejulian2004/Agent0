@@ -11,10 +11,13 @@ cd "$REPO_ROOT"
 TEACHER_PID="${TEACHER_PID:?Set TEACHER_PID to the current vLLM API server PID}"
 TEACHER_BASE_URL="${TEACHER_BASE_URL:-http://127.0.0.1:8000/v1}"
 TEACHER_MODEL="${TEACHER_MODEL:-qwen3.8-27b}"
+RETOOL_SOURCE="${RETOOL_SOURCE:-data/raw/.staging/retool-proxy/train_2000.parquet}"
+MULBERRY_SOURCE="${MULBERRY_SOURCE:-data/raw/.staging/mulberry-proxy/mulberry_sft.json}"
+MMEUREKA_SOURCE="${MMEUREKA_SOURCE:-data/raw/.staging/mmeureka-proxy/dataset.jsonl}"
 COMMON_ARGS=(
   --concurrency 64
   --batch-size 64
-  --sandbox-timeout 20
+  --sandbox-timeout 60
   --teacher-timeout 300
   --teacher-retries 2
   --teacher-base-url "$TEACHER_BASE_URL"
@@ -74,19 +77,19 @@ run_source() {
 wait_for_geoqa
 
 run_source retool \
-  /mnt/d/Agent0/Agent0-VL/data/raw/.staging/retool-proxy/train_2000.parquet \
+  "$RETOOL_SOURCE" \
   1 2000 data/sft/full/stage1_retool_train.jsonl stage1
 run_source mulberry \
-  /mnt/d/Agent0/Agent0-VL/data/raw/.staging/mulberry-proxy/mulberry_sft.json \
+  "$MULBERRY_SOURCE" \
   1 272775 data/sft/full/stage1_mulberry_train.jsonl stage1
 run_source retool \
-  /mnt/d/Agent0/Agent0-VL/data/raw/.staging/retool-proxy/train_2000.parquet \
+  "$RETOOL_SOURCE" \
   2 2000 data/sft/full/stage2_retool_train.jsonl stage2
 run_source mulberry \
-  /mnt/d/Agent0/Agent0-VL/data/raw/.staging/mulberry-proxy/mulberry_sft.json \
+  "$MULBERRY_SOURCE" \
   2 272775 data/sft/full/stage2_mulberry_train.jsonl stage2
 run_source mmeureka \
-  /mnt/d/Agent0/Agent0-VL/data/raw/.staging/mmeureka-proxy/dataset.jsonl \
+  "$MMEUREKA_SOURCE" \
   2 54931 data/sft/full/stage2_mmeureka_train.jsonl stage2
 
 .venv/bin/python -m tools.sft_builder.merge_sft --stage 1 \
@@ -97,6 +100,7 @@ run_source mmeureka \
   --output data/sft/stage1_full.jsonl \
   --manifest data/sft/stage1_full.manifest.json
 .venv/bin/python -m tools.sft_builder.merge_sft --stage 2 \
+  --allow-stage2-images \
   --input data/sft/full/stage2_retool_train.jsonl \
           data/sft/full/stage2_mulberry_train.jsonl \
           data/sft/full/stage2_mmeureka_train.jsonl \
@@ -105,11 +109,12 @@ run_source mmeureka \
 
 .venv/bin/python - <<'PY'
 from pathlib import Path
-from swift.llm import load_dataset
+from swift.dataset import load_dataset
 
 for path in (Path("data/sft/stage1_full.jsonl"), Path("data/sft/stage2_full.jsonl")):
-    dataset = load_dataset(str(path), strict=True)
-    print(f"validated {path}: {len(dataset)} rows")
+    train_dataset, val_dataset = load_dataset([str(path)], split_dataset_ratio=0, strict=True)
+    assert val_dataset is None
+    print(f"validated {path}: {len(train_dataset)} rows")
 PY
 
 if ps -p "$TEACHER_PID" -o args= 2>/dev/null | grep -F -- '--port 8000' >/dev/null; then

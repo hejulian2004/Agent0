@@ -1,4 +1,5 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -Eeuo pipefail
 set -x
 
 # ============================================================================
@@ -32,13 +33,24 @@ MODEL_PATH=${MODEL_PATH:-Qwen/Qwen2.5-VL-7B-Instruct}
 ITERATION=${ITERATION:-1}
 EXPERIMENT_NAME="agent0_vl_serc_iter${ITERATION}"
 CONFIG_NAME=${CONFIG_NAME:-agent0_trainer}
+REWARD_MANAGER=${REWARD_MANAGER:-agent0}
+ENABLE_VERIFICATION=${ENABLE_VERIFICATION:-True}
+ENABLE_SELF_REPAIR=${ENABLE_SELF_REPAIR:-True}
+TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
 
 # GRPO group size (paper: N=8)
 n=8
 
-export PYTHONPATH="${PWD}:${PYTHONPATH}"
+# Keep the RL launcher self-contained.  The current GPU environment is
+# installed in this repository's virtualenv; do not fall back to a system
+# Python or CUDA-dependent sampler configuration by accident.
+if [[ -x "${PWD}/.venv/bin/python3" ]]; then
+    export PATH="${PWD}/.venv/bin:${PATH}"
+fi
+export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
+export PYTHONPATH="${PWD}:${PYTHONPATH:-}"
 
-python3 -m verl.trainer.main_ppo \
+exec python3 -m verl.trainer.main_ppo \
     --config-name=$CONFIG_NAME \
     algorithm.adv_estimator=grpo \
     data.train_files=$train_data \
@@ -60,9 +72,9 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.max_reasoning_steps=8 \
     actor_rollout_ref.rollout.repair_threshold=0.7 \
     actor_rollout_ref.rollout.enable_tool_execution=True \
-    actor_rollout_ref.rollout.enable_verification=True \
-    actor_rollout_ref.rollout.enable_self_repair=True \
-    reward_model.reward_manager=agent0 \
+    actor_rollout_ref.rollout.enable_verification=$ENABLE_VERIFICATION \
+    actor_rollout_ref.rollout.enable_self_repair=$ENABLE_SELF_REPAIR \
+    reward_model.reward_manager=$REWARD_MANAGER \
     reward_model.lambda_tool=0.3 \
     reward_model.alpha_out=1.0 \
     reward_model.gamma=0.99 \
@@ -75,7 +87,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes=1 \
     trainer.save_freq=50 \
     trainer.test_freq=50 \
-    trainer.total_epochs=1 \
+    trainer.total_epochs=$TOTAL_EPOCHS \
     trainer.default_local_dir=$CKPT_PATH/$PROJECT_NAME/$EXPERIMENT_NAME \
     trainer.val_before_train=True \
     trainer.resume_mode=auto \

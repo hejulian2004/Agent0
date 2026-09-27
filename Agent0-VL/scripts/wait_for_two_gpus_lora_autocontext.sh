@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # Wait for two genuinely idle GPUs, probe the largest safe training context on
-# the longest Stage-1 example, then launch the two-GPU LoRA SFT.  The monitor
+# the longest Stage-1 example, then launch the two-GPU QLoRA SFT. The monitor
 # is local-only and never invokes the assistant or a model API.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,8 +13,8 @@ MIN_FREE_MIB="${MIN_FREE_MIB:-22000}"
 MAX_USED_MIB="${MAX_USED_MIB:-512}"
 MAX_UTIL="${MAX_UTIL:-5}"
 
-MODEL_PATH="${MODEL_PATH:-/mnt/d/Agent0/models/Qwen2.5-VL-7B-Instruct}"
-SFT_DATA="${SFT_DATA:-data/sft/large/stage1_500.jsonl}"
+MODEL_PATH="${MODEL_PATH:-$ROOT_DIR/checkpoints/base/Qwen2.5-VL-7B-Instruct}"
+SFT_DATA="${SFT_DATA:-data/sft/large/stage1_500_broad_local.jsonl}"
 OUTPUT_DIR="${OUTPUT_DIR:-checkpoints/paper_500/sft_stage1_lora_2gpu}"
 GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-64}"
 LOG_DIR="${LOG_DIR:-logs/lora_monitor}"
@@ -78,11 +78,21 @@ run_sft() {
 
     local -a args=(
         --model "$MODEL_PATH"
+        --use_hf true
+        --template qwen2_5_vl
         --dataset "$dataset"
+        --strict true
         --tuner_type lora
-        --lora_rank 8
-        --lora_alpha 32
+        --quant_method bnb
+        --quant_bits 4
+        --bnb_4bit_compute_dtype bfloat16
+        --bnb_4bit_quant_storage bfloat16
+        --bnb_4bit_quant_type nf4
+        --bnb_4bit_use_double_quant true
+        --lora_rank 16
+        --lora_alpha 64
         --lora_dropout 0.05
+        --target_modules all-linear
         --torch_dtype bfloat16
         --system scripts/prompt.txt
         --num_train_epochs "$epochs"
@@ -90,6 +100,7 @@ run_sft() {
         --per_device_eval_batch_size 1
         --learning_rate 1e-5
         --freeze_vit true
+        --freeze_aligner true
         --gradient_checkpointing true
         --gradient_accumulation_steps "$grad_accum"
         --save_strategy "$save_strategy"
@@ -151,7 +162,7 @@ probe_and_train() {
         return 1
     fi
 
-    log "starting formal 3-epoch 2-GPU LoRA SFT with max_length=${best}"
+    log "starting formal 3-epoch 2-GPU QLoRA SFT with max_length=${best}"
     run_sft "$best" "$SFT_DATA" "$OUTPUT_DIR" 3 "$GRAD_ACCUM_STEPS"
 }
 
@@ -165,7 +176,7 @@ while true; do
         probe_data="$(make_probe_data | tail -n 1)"
         if probe_and_train "$probe_data"; then
             rm -f "$probe_data"
-            log "formal Stage-1 LoRA training completed"
+            log "formal Stage-1 QLoRA training completed"
             exit 0
         fi
         rm -f "$probe_data"

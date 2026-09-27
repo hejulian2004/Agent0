@@ -103,6 +103,61 @@ def _qlora_dtype(value, default):
     return PrecisionType.to_dtype(value)
 
 
+def _restore_fsdp_4bit_storage(model, storage_dtype):
+    """Bitcast pre-quantized 4-bit weights to floating storage for FSDP."""
+    import bitsandbytes as bnb
+
+    if storage_dtype not in (torch.bfloat16, torch.float16, torch.float32):
+        raise ValueError(f"FSDP-QLoRA requires floating 4-bit storage, got {storage_dtype}")
+
+    storage_bytes = torch.empty((), dtype=storage_dtype).element_size()
+    converted = 0
+    for name, module in model.named_modules():
+        if not isinstance(module, bnb.nn.Linear4bit):
+            continue
+        weight = module.weight
+        if not isinstance(weight, bnb.nn.Params4bit):
+            raise ValueError(f"Expected Params4bit at {name}.weight, got {type(weight).__name__}")
+        if weight.dtype == torch.uint8:
+            if not weight.bnb_quantized or weight.quant_state is None:
+                raise ValueError(f"Missing quantization state for {name}.weight")
+            packed_bytes = weight.data.contiguous().reshape(-1)
+            if packed_bytes.numel() % storage_bytes:
+                raise ValueError(
+                    f"Packed size of {name}.weight is not divisible by {storage_bytes} bytes"
+                )
+            # This is a view of the same packed bytes, not a numeric cast.
+            # bitsandbytes reads the bytes using the quantization state.
+            with torch.no_grad():
+                weight.data = packed_bytes.view(storage_dtype).reshape(-1, 1)
+            converted += 1
+        elif weight.dtype != storage_dtype:
+            raise ValueError(f"Unexpected 4-bit storage for {name}.weight: {weight.dtype}")
+        weight.quant_storage = storage_dtype
+        module.quant_storage = storage_dtype
+
+    for quant_config in (
+        getattr(getattr(model, "hf_quantizer", None), "quantization_config", None),
+        getattr(getattr(model, "config", None), "quantization_config", None),
+    ):
+        if hasattr(quant_config, "bnb_4bit_quant_storage"):
+            quant_config.bnb_4bit_quant_storage = storage_dtype
+        elif isinstance(quant_config, dict):
+            quant_config["bnb_4bit_quant_storage"] = str(storage_dtype).split(".")[-1]
+
+    integer_parameters = [
+        f"{name} ({parameter.dtype})"
+        for name, parameter in model.named_parameters()
+        if not parameter.dtype.is_floating_point
+    ]
+    if integer_parameters:
+        raise ValueError(
+            "FSDP-QLoRA still has integer parameters: "
+            + ", ".join(integer_parameters[:5])
+        )
+    return converted
+
+
 class ActorRolloutRefWorker(Worker):
     """
     This worker can be instantiated as a standalone actor or a standalone rollout or a standalone reference policy
@@ -186,8 +241,16 @@ class ActorRolloutRefWorker(Worker):
                                role='actor'):
         from verl.utils.model import print_model_size, update_model_config, get_generation_config
         from verl.utils.torch_dtypes import PrecisionType
-        from transformers import AutoModelForCausalLM, AutoConfig, AutoModelForVision2Seq, BitsAndBytesConfig
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy, MixedPrecision, CPUOffload
+        from transformers import AutoModelForCausalLM, AutoConfig, BitsAndBytesConfig
+        try:
+            # Transformers <=4.x exposed the vision-language auto class under
+            # AutoModelForVision2Seq. Transformers 5 renamed it to
+            # AutoModelForImageTextToText; keep one local name because the
+            # model-selection logic below is otherwise unchanged.
+            from transformers import AutoModelForVision2Seq
+        except ImportError:
+            from transformers import AutoModelForImageTextToText as AutoModelForVision2Seq
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy, MixedPrecision, CPUOffload, BackwardPrefetch
         from torch import optim
 
         assert role in ['actor', 'ref']
@@ -208,9 +271,10 @@ class ActorRolloutRefWorker(Worker):
 
         lora_rank = int(self.config.actor.get("lora_rank", 0)) if role == "actor" else 0
         use_qlora = bool(self.config.actor.get("use_qlora", False)) if role == "actor" else False
+        train_with_qlora = use_qlora
         quantization_config = None
         if use_qlora:
-            if lora_rank <= 0:
+            if train_with_qlora and lora_rank <= 0:
                 raise ValueError("actor.use_qlora=True requires actor.lora_rank > 0")
             qlora_compute_dtype = _qlora_dtype(
                 self.config.actor.get("qlora_4bit_compute_dtype", "bf16"), "bf16")
@@ -248,6 +312,7 @@ class ActorRolloutRefWorker(Worker):
         override_config_kwargs.update(override_model_config)
         update_model_config(actor_model_config, override_config_kwargs=override_config_kwargs)
         restore_qwen25vl_rope_scaling(actor_model_config)
+        checkpoint_has_quantization = getattr(actor_model_config, "quantization_config", None) is not None
         if self.rank == 0:
             print(f'Model config after override: {actor_model_config}')
 
@@ -257,7 +322,8 @@ class ActorRolloutRefWorker(Worker):
         # Accelerate calls model.to(device). Load each QLoRA rank concretely,
         # then let FSDP shard the already-quantized module.
         init_context = get_init_weight_context_manager(
-            use_meta_tensor=not use_qlora and not actor_model_config.tie_word_embeddings,
+            use_meta_tensor=not (use_qlora or checkpoint_has_quantization)
+            and not actor_model_config.tie_word_embeddings,
             mesh=self.device_mesh)
 
         with init_context(), warnings.catch_warnings():
@@ -277,6 +343,12 @@ class ActorRolloutRefWorker(Worker):
             if quantization_config is not None:
                 model_kwargs['quantization_config'] = quantization_config
             actor_module = actor_module_class.from_pretrained(**model_kwargs)
+            if use_qlora:
+                converted = _restore_fsdp_4bit_storage(actor_module, qlora_storage_dtype)
+                if self.rank == 0:
+                    print(
+                        f"QLoRA storage ready for FSDP: {converted} pre-quantized weights "
+                        f"bitcast to {qlora_storage_dtype}.", flush=True)
 
             if use_remove_padding or self.ulysses_sequence_parallel_size > 1:
                 from verl.models.transformers.monkey_patch import apply_monkey_patch
@@ -287,17 +359,27 @@ class ActorRolloutRefWorker(Worker):
                 from liger_kernel.transformers.monkey_patch import _apply_liger_kernel_to_instance
                 _apply_liger_kernel_to_instance(model=actor_module)
 
-            # Quantized modules manage their own Params4bit device/dtype state;
-            # calling .to(dtype) on the complete QLoRA model would destroy that
-            # state. Non-quantized models retain the original VERL behavior.
-            if not use_qlora:
+            # A pre-quantized checkpoint can carry U8-packed Params4bit that
+            # FSDP cannot flatten. Keep QLoRA on the actor, but dequantize the
+            # frozen reference model to BF16 before FSDP wraps it.
+            is_quantized_model = getattr(actor_module, "is_quantized", False)
+            if role == "ref" and is_quantized_model:
+                if not hasattr(actor_module, "dequantize"):
+                    raise ValueError(
+                        "The reference checkpoint is quantized, but this Transformers model cannot dequantize it "
+                        "for FSDP."
+                    )
+                if self.rank == 0:
+                    print(f"Dequantizing quantized reference model to {torch_dtype} before FSDP.")
+                actor_module = actor_module.dequantize(dtype=torch_dtype)
+            elif not is_quantized_model:
                 # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
                 actor_module.to(torch_dtype)
 
             # RL can use the same PEFT path as SFT when full-parameter
             # optimization does not fit the available GPUs. The reference
             # policy remains a frozen base model; only the actor gets LoRA.
-            if use_qlora:
+            if train_with_qlora:
                 from peft import prepare_model_for_kbit_training
 
                 actor_module = prepare_model_for_kbit_training(
@@ -309,7 +391,7 @@ class ActorRolloutRefWorker(Worker):
             if lora_rank > 0:
                 from peft import LoraConfig, TaskType, get_peft_model
 
-                if not use_qlora:
+                if not train_with_qlora:
                     actor_module.enable_input_require_grads()
                 lora_config = LoraConfig(
                     task_type=TaskType.CAUSAL_LM,
@@ -320,7 +402,7 @@ class ActorRolloutRefWorker(Worker):
                     bias="none",
                 )
                 actor_module = get_peft_model(actor_module, lora_config)
-                if use_qlora:
+                if train_with_qlora:
                     # prepare_model_for_kbit_training intentionally promotes
                     # LayerNorm/lm_head to FP32. FSDP cannot flatten a QLoRA
                     # transformer block containing both FP32 parameters and
@@ -335,7 +417,7 @@ class ActorRolloutRefWorker(Worker):
                     actor_module.print_trainable_parameters()
 
             if enable_gradient_checkpointing:
-                if not use_qlora:
+                if not train_with_qlora:
                     actor_module.gradient_checkpointing_enable(
                         gradient_checkpointing_kwargs={'use_reentrant': False})
         torch.distributed.barrier()
@@ -372,6 +454,13 @@ class ActorRolloutRefWorker(Worker):
 
         fsdp_mesh = self.device_mesh
         sharding_strategy = get_sharding_strategy(fsdp_mesh)
+        backward_prefetch_name = str(fsdp_config.get('backward_prefetch', 'backward_pre')).upper()
+        backward_prefetch = {
+            'BACKWARD_PRE': BackwardPrefetch.BACKWARD_PRE,
+            'BACKWARD_POST': BackwardPrefetch.BACKWARD_POST,
+        }.get(backward_prefetch_name)
+        if backward_prefetch is None:
+            raise ValueError(f'Unknown FSDP backward_prefetch: {backward_prefetch_name}')
 
         # TODO: add transformer policy
         # We force reference policy to use CPUOffload to save memory.
@@ -391,7 +480,8 @@ class ActorRolloutRefWorker(Worker):
             mixed_precision=mixed_precision,
             sync_module_states=True,
             device_mesh=self.device_mesh,
-            forward_prefetch=False)
+            forward_prefetch=False,
+            backward_prefetch=backward_prefetch)
 
         log_gpu_memory_usage('After Actor FSDP init', logger=logger)
 
@@ -491,7 +581,8 @@ class ActorRolloutRefWorker(Worker):
                                                                model_config=self.actor_model_config,
                                                                full_params='hf' in self.config.rollout.load_format,
                                                                device_mesh=rollout_device_mesh,
-                                                               offload_actor=self._is_offload_param)
+                                                               offload_actor=self._is_offload_param,
+                                                               sleep_level=int(self.config.rollout.get('sleep_level', 1)))
             log_gpu_memory_usage('After building sharding manager', logger=None)
 
         elif rollout_name == 'sglang':
@@ -606,6 +697,11 @@ class ActorRolloutRefWorker(Worker):
         # PPO's dynamic/micro-batch splitting and can trigger OOM in backward.
 
         assert self._is_actor
+        if self._is_rollout and isinstance(self.rollout_sharding_manager, FSDPVLLMShardingManager):
+            # Must run before loading actor parameters or optimizer onto GPU.
+            self.rollout_sharding_manager.ensure_sleeping_for_actor()
+        if self.rank == 0:
+            print('[Agent0-VL trainer] actor_update_start', flush=True)
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         if self._is_offload_optimizer:
@@ -644,6 +740,8 @@ class ActorRolloutRefWorker(Worker):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(optimizer=self.actor_optimizer)
 
+        if self.rank == 0:
+            print('[Agent0-VL trainer] actor_update_done', flush=True)
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
@@ -652,6 +750,8 @@ class ActorRolloutRefWorker(Worker):
         prompts = prompts.to(torch.cuda.current_device())
 
         assert self._is_rollout
+        if self.rank == 0:
+            print('[Agent0-VL trainer] rollout_start', flush=True)
         # The FSDP state dict requires the actor parameters on the compute
         # device. The sharding manager offloads them again after copying the
         # state dict to CPU, before vLLM wakes up.
@@ -687,16 +787,20 @@ class ActorRolloutRefWorker(Worker):
 
         # clear kv cache
         log_gpu_memory_usage('After generate_sequences', logger=logger)
+        if self.rank == 0:
+            print('[Agent0-VL trainer] rollout_done', flush=True)
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_prob(self, data: DataProto):
         assert self._is_actor
+        if self.rank == 0:
+            print('[Agent0-VL trainer] old_logprob_start', flush=True)
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
-        # Support all hardwares
-        data = data.to(torch.cuda.current_device())
+        # Keep the expanded rollout batch on CPU. DataParallelPPOActor moves
+        # only the current log-prob micro-batch to the actor device.
         # we should always recompute old_log_probs when it is HybridEngine
         data.meta_info['micro_batch_size'] = self.config.rollout.log_prob_micro_batch_size_per_gpu
         data.meta_info['max_token_len'] = self.config.rollout.log_prob_max_token_len_per_gpu
@@ -721,14 +825,18 @@ class ActorRolloutRefWorker(Worker):
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
 
         log_gpu_memory_usage('After compute_log_prob', logger=logger)
+        if self.rank == 0:
+            print('[Agent0-VL trainer] old_logprob_done', flush=True)
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_ref_log_prob(self, data: DataProto):
         assert self._is_ref
+        if self.rank == 0:
+            print('[Agent0-VL trainer] ref_logprob_start', flush=True)
 
-        # Support all hardwares
-        data = data.to(torch.cuda.current_device())
+        # Keep the expanded rollout batch on CPU; compute_log_prob performs
+        # per-micro-batch transfers for the frozen reference model as well.
 
         micro_batch_size = self.config.ref.log_prob_micro_batch_size_per_gpu
         data.meta_info['micro_batch_size'] = micro_batch_size
@@ -748,6 +856,8 @@ class ActorRolloutRefWorker(Worker):
         if self.world_size > 1:
             self.ref_policy.actor_module._handle.reshard(True)
 
+        if self.rank == 0:
+            print('[Agent0-VL trainer] ref_logprob_done', flush=True)
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)

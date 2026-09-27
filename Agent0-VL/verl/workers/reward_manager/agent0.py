@@ -103,6 +103,15 @@ class Agent0RewardManager:
             'step_counts': torch.zeros(batch_size, dtype=torch.long, device=device),
             'repair_flags': torch.zeros((batch_size, self.max_steps), dtype=torch.float32, device=device),
             'tool_success': torch.zeros((batch_size, self.max_steps), dtype=torch.float32, device=device),
+            'tool_calls': torch.zeros((batch_size, self.max_steps), dtype=torch.float32, device=device),
+            'successful_tool_calls': torch.zeros((batch_size, self.max_steps), dtype=torch.float32, device=device),
+            'verifier_triggered': torch.zeros((batch_size, self.max_steps), dtype=torch.float32, device=device),
+            'verifier_calls': torch.zeros((batch_size, self.max_steps), dtype=torch.float32, device=device),
+            'valid_verifier_calls': torch.zeros((batch_size, self.max_steps), dtype=torch.float32, device=device),
+            'repair_triggered': torch.zeros((batch_size, self.max_steps), dtype=torch.float32, device=device),
+            'repair_applied': torch.zeros((batch_size, self.max_steps), dtype=torch.float32, device=device),
+            'repair_success': torch.zeros((batch_size, self.max_steps), dtype=torch.float32, device=device),
+            'repair_score_improved': torch.zeros((batch_size, self.max_steps), dtype=torch.float32, device=device),
             'outcome_acc': torch.zeros(batch_size, dtype=torch.float32, device=device),
         }
 
@@ -158,9 +167,35 @@ class Agent0RewardManager:
 
                 if step_idx < self.max_steps:
                     metrics_tensors['step_scores'][i, step_idx] = score
-                    metrics_tensors['verify_confidences'][i, step_idx] = confidence
+                    if sd.get('verifier_triggered', sd.get('verified', False)):
+                        metrics_tensors['verify_confidences'][i, step_idx] = confidence
                     metrics_tensors['repair_flags'][i, step_idx] = 1.0 if was_repaired else 0.0
                     metrics_tensors['tool_success'][i, step_idx] = r_tool
+                    metrics_tensors['tool_calls'][i, step_idx] = int(
+                        sd.get('tool_call_count', int(sd.get('tool_used', False)))
+                    )
+                    metrics_tensors['successful_tool_calls'][i, step_idx] = int(
+                        sd.get('successful_tool_call_count', int(tool_success))
+                    )
+                    metrics_tensors['verifier_triggered'][i, step_idx] = float(
+                        sd.get('verifier_triggered', sd.get('verified', False))
+                    )
+                    metrics_tensors['verifier_calls'][i, step_idx] = int(
+                        sd.get('verifier_calls', int(sd.get('verified', False)))
+                    )
+                    metrics_tensors['valid_verifier_calls'][i, step_idx] = int(
+                        sd.get('verifier_successful_calls', int(sd.get('verified', False)))
+                    )
+                    metrics_tensors['repair_triggered'][i, step_idx] = float(
+                        sd.get('repair_triggered', was_repaired)
+                    )
+                    metrics_tensors['repair_applied'][i, step_idx] = float(was_repaired)
+                    metrics_tensors['repair_success'][i, step_idx] = float(
+                        sd.get('repair_success', False)
+                    )
+                    metrics_tensors['repair_score_improved'][i, step_idx] = float(
+                        sd.get('repair_score_improved', False)
+                    )
 
             # ---- Outcome reward r_out (Eq. 5) ----
             # The rollout already extracts each trajectory's final answer
@@ -180,8 +215,13 @@ class Agent0RewardManager:
                     decode_ids = response_ids
                 solution_str = self.tokenizer.decode(decode_ids, skip_special_tokens=True)
 
-            score_fn = self.compute_score or get_policy_score
-            outcome_result = score_fn(solution_str=solution_str, ground_truth=ground_truth)
+            reward_model = data_item.non_tensor_batch.get('reward_model', {})
+            if not isinstance(reward_model, dict):
+                reward_model = {}
+            if self.compute_score is not None:
+                outcome_result = self.compute_score(solution_str=solution_str, ground_truth=ground_truth)
+            else:
+                outcome_result = get_policy_score(solution_str=solution_str, ground_truth=ground_truth)
             if isinstance(outcome_result, dict):
                 r_out = float(outcome_result.get('acc', outcome_result.get('score', 0.0)))
                 pred = outcome_result.get('pred', '')
@@ -196,9 +236,33 @@ class Agent0RewardManager:
             # ---- Extra info ----
             reward_extra_info['pred'].append(pred)
             reward_extra_info['acc'].append(r_out)
+            reward_extra_info['ground_truth'].append(ground_truth)
+            reward_extra_info['response'].append(
+                self.tokenizer.decode(response_ids, skip_special_tokens=True)
+            )
             reward_extra_info['num_steps'].append(num_steps)
             reward_extra_info['num_repairs'].append(
                 sum(1 for sd in step_data if sd.get('was_repaired', False)))
+            reward_extra_info['tool_call_count'].append(
+                sum(int(sd.get('tool_call_count', int(sd.get('tool_used', False)))) for sd in step_data))
+            reward_extra_info['successful_tool_calls'].append(
+                sum(int(sd.get('successful_tool_call_count', int(sd.get('tool_success', False))))
+                    for sd in step_data))
+            reward_extra_info['verifier_trigger_count'].append(
+                sum(int(sd.get('verifier_triggered', sd.get('verified', False))) for sd in step_data))
+            reward_extra_info['verifier_call_count'].append(
+                sum(int(sd.get('verifier_calls', int(sd.get('verified', False)))) for sd in step_data))
+            reward_extra_info['valid_verifier_calls'].append(
+                sum(int(sd.get('verifier_successful_calls', int(sd.get('verified', False))))
+                    for sd in step_data))
+            reward_extra_info['repair_trigger_count'].append(
+                sum(int(sd.get('repair_triggered', sd.get('was_repaired', False))) for sd in step_data))
+            reward_extra_info['repair_applied_count'].append(
+                sum(int(sd.get('was_repaired', False)) for sd in step_data))
+            reward_extra_info['repair_success_count'].append(
+                sum(int(sd.get('repair_success', False)) for sd in step_data))
+            reward_extra_info['repair_score_improvement_count'].append(
+                sum(int(sd.get('repair_score_improved', False)) for sd in step_data))
             reward_extra_info['total_return'].append(
                 self.alpha_out * r_out + sum((self.gamma ** t) * r for t, r in enumerate(effective_rewards)))
 
@@ -284,6 +348,7 @@ class Agent0RewardManager:
             return metrics
 
         metrics[f'{prefix}outcome_acc'] = t['outcome_acc'].mean().item()
+        metrics[f'{prefix}answer_accuracy'] = t['outcome_acc'].mean().item()
         metrics[f'{prefix}avg_num_steps'] = step_counts.float().mean().item()
 
         # Per-step verification statistics over samples that reached step i
@@ -294,17 +359,44 @@ class Agent0RewardManager:
                 metrics[f'{prefix}step_{i + 1}_confidence'] = t['verify_confidences'][valid_mask, i].mean().item()
 
         total_steps = step_counts.sum().item()
-        metrics[f'{prefix}repair_rate'] = t['repair_flags'].sum().item() / max(total_steps, 1)
-        metrics[f'{prefix}total_repairs'] = t['repair_flags'].sum().item()
+        verifier_steps = t['verifier_triggered'].sum().item()
+        verifier_calls = t['verifier_calls'].sum().item()
+        valid_verifier_calls = t['valid_verifier_calls'].sum().item()
+        repair_triggers = t['repair_triggered'].sum().item()
+        repair_applied = t['repair_applied'].sum().item()
+        repair_successes = t['repair_success'].sum().item()
+        repair_score_improvements = t['repair_score_improved'].sum().item()
+        tool_calls = t['tool_calls'].sum().item()
+        successful_tool_calls = t['successful_tool_calls'].sum().item()
 
-        tool_success_sum, tool_count, conf_sum = 0.0, 0, 0.0
+        metrics[f'{prefix}verifier_trigger_count'] = verifier_steps
+        metrics[f'{prefix}verifier_trigger_rate'] = verifier_steps / max(total_steps, 1)
+        metrics[f'{prefix}verifier_call_count'] = verifier_calls
+        metrics[f'{prefix}valid_verifier_calls'] = valid_verifier_calls
+        metrics[f'{prefix}verifier_call_success_rate'] = valid_verifier_calls / max(verifier_calls, 1)
+        metrics[f'{prefix}repair_trigger_count'] = repair_triggers
+        metrics[f'{prefix}repair_trigger_rate'] = repair_triggers / max(verifier_steps, 1)
+        metrics[f'{prefix}repair_applied_count'] = repair_applied
+        metrics[f'{prefix}repair_application_rate'] = repair_applied / max(repair_triggers, 1)
+        metrics[f'{prefix}repair_success_count'] = repair_successes
+        metrics[f'{prefix}repair_success_rate'] = repair_successes / max(repair_applied, 1)
+        metrics[f'{prefix}repair_score_improvement_count'] = repair_score_improvements
+        metrics[f'{prefix}repair_score_improvement_rate'] = repair_score_improvements / max(repair_applied, 1)
+        metrics[f'{prefix}repair_rate'] = repair_applied / max(total_steps, 1)
+        metrics[f'{prefix}total_repairs'] = repair_applied
+        metrics[f'{prefix}tool_call_count'] = tool_calls
+        metrics[f'{prefix}successful_tool_calls'] = successful_tool_calls
+        metrics[f'{prefix}tool_call_success_rate'] = successful_tool_calls / max(tool_calls, 1)
+        metrics[f'{prefix}tool_success_rate'] = metrics[f'{prefix}tool_call_success_rate']
+
+        tool_step_success_sum, tool_step_count, conf_sum = 0.0, 0, 0.0
         for b in range(batch_size):
             n_steps = min(int(step_counts[b].item()), self.max_steps)
             if n_steps > 0:
-                tool_success_sum += t['tool_success'][b, :n_steps].sum().item()
+                tool_step_success_sum += t['tool_success'][b, :n_steps].sum().item()
                 conf_sum += t['verify_confidences'][b, :n_steps].sum().item()
-                tool_count += n_steps
-        metrics[f'{prefix}tool_success_rate'] = tool_success_sum / max(tool_count, 1)
-        metrics[f'{prefix}avg_verify_confidence'] = conf_sum / max(tool_count, 1)
+                tool_step_count += n_steps
+        metrics[f'{prefix}tool_step_success_rate'] = tool_step_success_sum / max(tool_step_count, 1)
+        metrics[f'{prefix}avg_verify_confidence'] = conf_sum / max(verifier_steps, 1)
 
         return metrics

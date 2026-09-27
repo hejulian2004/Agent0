@@ -9,17 +9,23 @@ defaults:
   - _self_
 
 data:
-  train_batch_size: 8
+  train_batch_size: 2
+  # Multimodal token expansion makes some 200-row prompts exceed the base
+  # profile's 4096 limit. 6144 + 3072 trajectory tokens fits 9216 context.
+  max_prompt_length: 6144
 
 actor_rollout_ref:
   actor:
-    ppo_mini_batch_size: 8
+    activation_cpu_offload: True
+    response_only_logits: True
+    ppo_mini_batch_size: 1
     ppo_micro_batch_size_per_gpu: 1
     use_dynamic_bsz: True
-    ppo_max_token_len_per_gpu: 12288
+    ppo_max_token_len_per_gpu: 9216
     fsdp_config:
       param_offload: True
       optimizer_offload: True
+      backward_prefetch: backward_post
 
   rollout:
     tensor_model_parallel_size: 2
@@ -29,10 +35,13 @@ actor_rollout_ref:
     enforce_eager: True
     free_cache_engine: True
     load_format: dummy_hf
-    max_num_seqs: 2
-    max_model_len: 12288
-    max_num_batched_tokens: 12288
-    max_total_response_length: 4096
+    sleep_level: 2
+    # Generation already succeeds at six-way scheduling. The lower context
+    # and trajectory ceilings target the measured single-sample backward peak.
+    max_num_seqs: 6
+    max_model_len: 9216
+    max_num_batched_tokens: 9216
+    max_total_response_length: 3072
     log_prob_micro_batch_size_per_gpu: 1
     n: 8
 

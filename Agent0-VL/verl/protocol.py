@@ -26,6 +26,7 @@ from typing import Callable, Dict, List, Union
 import torch
 import tensordict
 from tensordict import TensorDict
+from packaging import version as packaging_version
 from torch.utils.data import DataLoader, Dataset
 
 from verl.utils.py_functional import union_two_dict
@@ -232,7 +233,8 @@ class DataProto:
     def __getstate__(self):
         import io
         buffer = io.BytesIO()
-        if tensordict.__version__ >= '0.5.0' and self.batch is not None:
+        if (packaging_version.parse(tensordict.__version__) >= packaging_version.parse('0.5.0')
+                and self.batch is not None):
             self.batch = self.batch.contiguous()
             self.batch = self.batch.consolidate()
         torch.save(self.batch, buffer)

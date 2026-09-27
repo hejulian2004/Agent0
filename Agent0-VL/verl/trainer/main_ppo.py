@@ -182,6 +182,10 @@ class TaskRunner:
             from verl.workers.reward_manager.agent0 import Agent0RewardManager
             reward_manager_cls = Agent0RewardManager
             val_reward_manager_cls = Agent0RewardManager
+        elif reward_manager_name == 'external':
+            from verl.workers.reward_manager.external import ExternalCorrectnessRewardManager
+            reward_manager_cls = ExternalCorrectnessRewardManager
+            val_reward_manager_cls = ExternalCorrectnessRewardManager
         elif reward_manager_name == 'evo':
             from verl.workers.reward_manager.evo import EvoTIRRewardManager
             reward_manager_cls = EvoTIRRewardManager

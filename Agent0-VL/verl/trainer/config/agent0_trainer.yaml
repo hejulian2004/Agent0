@@ -23,6 +23,10 @@ data:
   max_prompt_length: 4096
   max_response_length: 2048
   train_batch_size: 256
+  # Keep the existing training-time validation loader defaults; the benchmark
+  # evaluation launcher overrides these with a smaller host-memory profile.
+  val_num_workers: 8
+  val_prefetch_factor: 2
   filter_overlong_prompts: True
   filter_overlong_prompts_workers: 4
   # RL parquet prompts contain only the user question; inject the Solver
@@ -103,7 +107,7 @@ actor_rollout_ref:
     enable_tool_execution: True
     enable_verification: True
     enable_self_repair: True
-    sandbox_timeout: 10
+    sandbox_timeout: 60
     val_kwargs:
       top_k: -1
       top_p: 0.95

@@ -1,11 +1,4 @@
-"""Builder-owned Verifier, Repair, and regeneration prompts.
-
-The Solver prompt is intentionally not copied here.  The official training
-scripts pass ``scripts/prompt.txt`` as their system prompt, so the builder
-reads that same file.  The two templates below mirror
-``vllm_agent0_rollout_spmd.py::_load_prompt_templates`` from the pinned
-release; they are the prompts actually injected by the released runtime.
-"""
+"""Read the released SFT system prompt and rollout role prompts."""
 
 from __future__ import annotations
 
@@ -46,49 +39,17 @@ or:
 {{"action": "NO_CHANGE", "target_step": {step_index}, "reason": "<why repair is not warranted>"}}"""
 
 
-REGENERATE_PROMPT_TEMPLATE = """Now switch back to the Solver role. Apply the repair instruction to the previous reasoning step.
-
-Repair instruction:
+REGENERATE_PROMPT_TEMPLATE = """A repair instruction has been issued for the previous step:
 {repair_instruction}
 
-Regenerate only the corrected local reasoning segment. Preserve validated context.
-If computation or image inspection is needed, emit a fenced Python block, wait for
-the [Code Execution Result] observation, and then continue. Do not claim that the
-repair succeeded without using the returned evidence."""
+Switch back to the Solver role. Re-derive the corrected reasoning step applying this patch, then continue toward the final answer."""
 
 
-CONTINUE_SOLVER_PROMPT_TEMPLATE = """Now switch back to the Solver role and continue the solution from the validated context above.
-Do not repeat the Verifier JSON. If another computation or image inspection is needed,
-use a fenced Python block and wait for the [Code Execution Result] observation."""
-
-
-STAGE_SOLVER_CONTRACTS = {
-    1: """You are generating a high-quality Stage 1 visual tool-use trajectory.
-The user question may contain one or more <image> markers. If an image is present,
-you MUST inspect it with at least one fenced Python code block before answering.
-Inside the sandbox, `image_path` is an already-defined Python variable pointing to
-the first input image: write `Image.open(image_path)`, never `Image.open("image_path")`.
-Use PIL, OpenCV, matplotlib, pytesseract, or ordinary Python as appropriate. Only
-inspect that one image; do not list directories, scan unrelated files, or run OCR
-across many files. Avoid `plt.show()` and print concise objective evidence. Do not give the final answer in the same message
-as a code block: wait for the [Code Execution Result] observation, then continue
-the reasoning and answer. End the final Solver response with:
-<answer>
-\\boxed{...}
-</answer>""",
-    2: """You are generating a high-quality Stage 2 mathematical code-reasoning
-trajectory. Use at least one fenced Python code block to calculate or independently
-check the answer, and make the code print its result. Do not give the final answer
-in the same message as a code block: wait for the [Code Execution Result] observation,
-then explain the result. End the final Solver response with:
-<answer>
-\\boxed{...}
-</answer>""",
-}
+CONTINUE_SOLVER_PROMPT_TEMPLATE = "Continue solving the problem using the conversation so far."
 
 
 def load_solver_system_prompt(repo_root: str | Path | None = None) -> str:
-    """Read the pinned repository's authoritative ``scripts/prompt.txt``."""
+    """Read the released ``scripts/prompt.txt`` without adding instructions."""
 
     if repo_root is None:
         root = Path(__file__).resolve().parents[2]
@@ -101,12 +62,11 @@ def load_solver_system_prompt(repo_root: str | Path | None = None) -> str:
 
 
 def load_stage_solver_prompt(repo_root: str | Path | None, stage: int) -> str:
-    """Append a builder-only stage contract without changing ``prompt.txt``."""
+    """Use the same released system prompt for both SFT stages."""
 
-    if stage not in STAGE_SOLVER_CONTRACTS:
+    if stage not in (1, 2):
         raise ValueError(f"Unsupported SFT stage: {stage}")
-    base = load_solver_system_prompt(repo_root).rstrip()
-    return f"{base}\n\n{STAGE_SOLVER_CONTRACTS[stage]}"
+    return load_solver_system_prompt(repo_root)
 
 
 def verifier_prompt(step_content: str, tool_outputs: str | None, step_index: int) -> str:

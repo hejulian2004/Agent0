@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - optional dependency
     _AIOHTTP_AVAILABLE = False
 
 
-async def _post_snippet(endpoint: str, payload: dict, *, client_timeout: float = 30.0) -> dict:
+async def _post_snippet(endpoint: str, payload: dict, *, client_timeout: float = 75.0) -> dict:
     """Low-level HTTP POST to the sandbox and return parsed JSON."""
     timeout = aiohttp.ClientTimeout(total=client_timeout)
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -51,7 +51,7 @@ async def single_sandbox(
     endpoint: str = "",
     language: str = "python",
     compile_timeout: float = 1.0,
-    run_timeout: float = 10.0,
+    run_timeout: float = 60.0,
     semaphore: Optional[asyncio.Semaphore] = None,
     max_attempts: int = 2,
 ) -> dict:
@@ -71,7 +71,11 @@ async def single_sandbox(
     for attempt in range(1, max_attempts + 1):
         try:
             async with semaphore:
-                response = await _post_snippet(endpoint, payload)
+                response = await _post_snippet(
+                    endpoint,
+                    payload,
+                    client_timeout=max(75.0, run_timeout + 5.0),
+                )
             break
         except Exception as exc:  # noqa: BLE001
             logging.warning("single_sandbox attempt %s/%s failed: %s", attempt, max_attempts, exc)
@@ -99,7 +103,7 @@ async def parallel_sandbox(
     execution.
 
     ``run_timeout`` overrides the per-snippet run limit; when ``None`` the
-    ``SANDBOX_RUN_TIMEOUT`` environment default (10s) is used.
+    ``SANDBOX_RUN_TIMEOUT`` environment default (60s) is used.
     """
     endpoint = os.getenv("SANDBOX_ENDPOINT", None)
     if endpoint is None or not _AIOHTTP_AVAILABLE:
@@ -111,7 +115,7 @@ async def parallel_sandbox(
                                             run_timeout=run_timeout)
 
     if run_timeout is None:
-        run_timeout = float(os.getenv("SANDBOX_RUN_TIMEOUT", "10"))
+        run_timeout = float(os.getenv("SANDBOX_RUN_TIMEOUT", "60"))
     semaphore = asyncio.Semaphore(num_processes)
     if stdin_list is None:
         coros = [single_sandbox(code=code, endpoint=endpoint, semaphore=semaphore, run_timeout=run_timeout) for code in tasks]

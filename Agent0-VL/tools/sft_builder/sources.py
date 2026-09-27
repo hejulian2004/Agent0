@@ -13,6 +13,7 @@ never copied into a teacher request or an exported SFT row.
 from __future__ import annotations
 
 import json
+import hashlib
 import pickle
 import re
 from pathlib import Path
@@ -20,17 +21,27 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tupl
 
 
 SOURCE_STAGES = {
+    "normalized": 2,
     "geometry3k": 1,
     "geoqa": 1,
     "mulberry": 1,
+    "llava_ov_image": 1,
+    "mm_rlhf": 1,
+    "smr": 1,
+    "arxivqa": 1,
     "retool": 2,
     "mmeureka": 2,
 }
 
 SOURCE_STAGE_OPTIONS = {
+    "normalized": (1, 2),
     "geometry3k": (1,),
     "geoqa": (1,),
     "mulberry": (1, 2),
+    "llava_ov_image": (1,),
+    "mm_rlhf": (1,),
+    "smr": (1,),
+    "arxivqa": (1,),
     "retool": (1, 2),
     "mmeureka": (2,),
 }
@@ -42,6 +53,8 @@ _SOURCE_ALIASES = {
     "dapo_math": "retool",
     "dapo_math_17k": "retool",
     "mm_eureka": "mmeureka",
+    "llava-ov-image": "llava_ov_image",
+    "mm-rlhf": "mm_rlhf",
 }
 
 _IMAGE_KEYS = (
@@ -210,11 +223,34 @@ def _read_data_file(path: Path) -> List[Dict[str, Any]]:
     raise SourceFormatError(f"Unsupported source file type: {path}")
 
 
+def _iter_data_file(path: Path) -> Iterator[Dict[str, Any]]:
+    """Stream large JSONL/Parquet train files during proportional indexing."""
+    suffix = path.suffix.lower()
+    if suffix == ".jsonl":
+        with path.open(encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, 1):
+                if line.strip():
+                    row = json.loads(line)
+                    if not isinstance(row, dict):
+                        raise SourceFormatError(f"Row {line_number} in {path} is not an object")
+                    yield row
+        return
+    if suffix in {".parquet", ".pq"}:
+        try:
+            import pyarrow.parquet as pq
+            for batch in pq.ParquetFile(path).iter_batches(batch_size=256):
+                yield from batch.to_pylist()
+        except Exception as exc:
+            raise SourceFormatError(f"Could not stream parquet {path}: {exc}") from exc
+        return
+    yield from _read_data_file(path)
+
+
 def _iter_file_rows(path: Path) -> Iterator[Tuple[Dict[str, Any], Path, Path]]:
     """Yield ``(row, row_base_dir, source_file)`` for a file or directory."""
 
     if path.is_file():
-        for row in _read_data_file(path):
+        for row in _iter_data_file(path):
             yield row, path.parent, path
         return
 
@@ -228,7 +264,7 @@ def _iter_file_rows(path: Path) -> Iterator[Tuple[Dict[str, Any], Path, Path]]:
     for file_path in sorted(set(files)):
         if file_path.name in ignored_names:
             continue
-        for row in _read_data_file(file_path):
+        for row in _iter_data_file(file_path):
             yield row, file_path.parent, file_path
 
 
@@ -358,6 +394,22 @@ def _image_values(row: Dict[str, Any]) -> List[Any]:
 def _resolve_image(value: Any, base_dir: Path) -> str:
     value = _unwrap_singleton(value)
     if isinstance(value, dict):
+        embedded = value.get("bytes")
+        if isinstance(embedded, (bytes, bytearray)) and embedded:
+            image_cache = Path("data/sft/rebuild_paper_1000/images").resolve()
+            image_cache.mkdir(parents=True, exist_ok=True)
+            digest = hashlib.sha256(embedded).hexdigest()
+            from io import BytesIO
+            from PIL import Image
+
+            with Image.open(BytesIO(embedded)) as image:
+                image_format = (image.format or "PNG").lower()
+                image.verify()
+            extension = "jpg" if image_format == "jpeg" else image_format
+            image_path = image_cache / f"{digest}.{extension}"
+            if not image_path.is_file():
+                image_path.write_bytes(embedded)
+            return str(image_path)
         value = value.get("path") or value.get("filename") or value.get("image_path")
     if not isinstance(value, str) or not value.strip():
         raise SourceFormatError(
@@ -370,6 +422,11 @@ def _resolve_image(value: Any, base_dir: Path) -> str:
     image_path = Path(value).expanduser()
     if image_path.is_absolute():
         candidates = [image_path]
+        old_root = Path("/mnt/d/Agent0/Agent0-VL")
+        try:
+            candidates.append(Path.cwd() / image_path.relative_to(old_root))
+        except ValueError:
+            pass
     else:
         candidates = [
             base_dir / image_path,
@@ -377,6 +434,9 @@ def _resolve_image(value: Any, base_dir: Path) -> str:
             base_dir / "images" / image_path,
             base_dir.parent / image_path,
         ]
+    # SMR references the same upstream arXivQA image archive by its original path.
+    if "smr" in base_dir.parts and value.startswith("arxivqa/images/"):
+        candidates.append(Path.cwd() / "data/raw/.staging/arxivqa-probe/images" / Path(value).name)
     image_path = next((candidate for candidate in candidates if candidate.is_file()), candidates[0])
     if not image_path.exists() or not image_path.is_file():
         raise SourceFormatError(f"Image path does not exist: {image_path}")
@@ -419,7 +479,7 @@ def _clean_question(question: str) -> str:
 
 
 def _raw_ground_truth(row: Dict[str, Any], source: str) -> Any:
-    value: Any = None
+    value: Any = row.get("label") if source == "arxivqa" else None
     for key in ("ground_truth", "gt_answer", "reference_answer", "answer"):
         if key in row and row[key] not in (None, ""):
             value = row[key]
@@ -428,24 +488,35 @@ def _raw_ground_truth(row: Dict[str, Any], source: str) -> Any:
         value = _nested_value(row, "reward_model", "ground_truth")
     if value is None and source == "mulberry":
         value = row.get("gt")
-    if value is None and source in {"mulberry", "retool"}:
-        messages = _unwrap_singleton(row.get("messages"))
+    if value is None and source in {"mulberry", "retool", "llava_ov_image", "mm_rlhf", "smr"}:
+        messages = _unwrap_singleton(row.get("messages") or row.get("conversations"))
         if isinstance(messages, (list, tuple)):
-            for message in reversed(messages):
+            # Use the last assistant response within the first question's
+            # conversation, including tool turns. A new user question ends
+            # that group; tool observations/continuation prompts do not.
+            found_user = False
+            for message in messages:
                 if not isinstance(message, dict):
                     continue
-                role = str(message.get("role") or message.get("from") or "").lower()
-                if role in {"assistant", "gpt", "bot"}:
-                    value = message.get("content")
-                    if value:
+                role = str(message.get("role") or message.get("from") or message.get("speaker") or "").lower()
+                content = message.get("content") or message.get("value") or message.get("text")
+                if role in {"user", "human", "question", "prompter"}:
+                    if found_user:
+                        text = str(content or "").strip()
+                        if text.startswith("[Code Execution Result]") or text == "Continue solving the problem using the conversation so far.":
+                            continue
                         break
+                    found_user = True
+                    continue
+                if found_user and role in {"assistant", "gpt", "bot"} and content:
+                    value = content
     return value
 
 
 def _reference_marker(text: str, source: str) -> str:
     """Extract a final marker from sources that contain old assistant turns."""
 
-    if source not in {"mulberry", "retool"}:
+    if source not in {"mulberry", "retool", "llava_ov_image", "mm_rlhf", "smr"}:
         return text
     boxed = re.findall(r"\\boxed\{([^{}]+)\}", text)
     if boxed:
@@ -519,7 +590,7 @@ def _normalize_row(
     if not question:
         raise SourceFormatError(f"No question found in {source_file} row {ordinal}")
     choices = _extract_choices(row)
-    if source == "geometry3k":
+    if source in {"geometry3k", "geoqa", "arxivqa"} and choices:
         question = _question_with_choices(question, choices)
     images = _extract_images(row, base_dir)
     question = _clean_question(question)
@@ -550,6 +621,15 @@ def iter_source_samples(
     stage is rejected rather than silently randomizing or reassigning data.
     """
 
+    if source == "normalized":
+        with Path(source_path).open(encoding="utf-8") as handle:
+            for line in handle:
+                row = json.loads(line)
+                if not row.get("question") or not isinstance(row.get("images"), list):
+                    raise SourceFormatError("Invalid prepared candidate")
+                row["stage"] = int(stage or 2)
+                yield row
+        return
     canonical = canonical_source_name(source)
     expected_stage = SOURCE_STAGES[canonical]
     allowed_stages = SOURCE_STAGE_OPTIONS[canonical]

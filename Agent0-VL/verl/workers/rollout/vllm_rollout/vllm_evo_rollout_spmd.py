@@ -33,8 +33,11 @@ from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
 from verl.workers.rollout.base import BaseRollout
 from vllm.distributed import parallel_state as vllm_ps
 from vllm import LLM, SamplingParams
-from verl.third_party.vllm import vllm_version
-from verl.workers.rollout.vllm_rollout.vllm_rollout_spmd import vLLMRollout
+from verl.third_party.vllm import vllm_mm_cache_kwargs, vllm_version
+from verl.workers.rollout.vllm_rollout.vllm_rollout_spmd import (
+    get_model_max_position_embeddings,
+    vLLMRollout,
+)
 
 # NOTE(sgm): add for verl. We can optimize it by making the dataloader yield List[int] without padding.
 def _pre_process_inputs(pad_token_id, prompt_token_ids: torch.Tensor) -> List[int]:
@@ -115,10 +118,12 @@ class vLLMEvoTIRRollout(vLLMRollout):
             "regenerate": "You indicated that your previous answer was wrong. Please provide the correct solution to the math problem."
         }
 
+        model_max_position_embeddings = get_model_max_position_embeddings(model_hf_config)
+
         # Calculate max model length
         if self.end_with_verifer:
             max_model_len = self.config.response_length * self.num_turns * 2 + config.prompt_length
-            max_model_len = min(max_model_len, model_hf_config.max_position_embeddings)
+            max_model_len = min(max_model_len, model_max_position_embeddings)
         else:
             max_model_len = (config.prompt_length + 
                            self.num_turns * self.config.response_length + 
@@ -126,7 +131,7 @@ class vLLMEvoTIRRollout(vLLMRollout):
         
         if config.get('max_model_len', None) is not None:
             max_model_len = config.get('max_model_len')
-        assert model_hf_config.max_position_embeddings >= max_model_len, \
+        assert model_max_position_embeddings >= max_model_len, \
             "model context length should be greater than total sequence length"
 
         max_num_batched_tokens = config.get('max_num_batched_tokens', 8192)
@@ -143,7 +148,6 @@ class vLLMEvoTIRRollout(vLLMRollout):
             enforce_eager=config.enforce_eager,
             gpu_memory_utilization=config.gpu_memory_utilization,
             disable_custom_all_reduce=True,
-            disable_mm_preprocessor_cache=True,
             skip_tokenizer_init=False,
             max_model_len=max_model_len,
             disable_log_stats=config.disable_log_stats,
@@ -152,6 +156,7 @@ class vLLMEvoTIRRollout(vLLMRollout):
             enable_prefix_caching=True,
             trust_remote_code=kwargs.get('trust_remote_code', False),
             seed=42,
+            **vllm_mm_cache_kwargs(),
         )
 
         # Offload model to reduce peak memory usage
@@ -453,4 +458,4 @@ class vLLMEvoTIRRollout(vLLMRollout):
             "final_generation_turn": np.array(final_generation_turn, dtype=np.int32), 
             "verify_probs": np.array(verify_probs, dtype=np.float32),
             "full_verify_probs": np.array(full_verify_probs, dtype=object)
-        }) 
+        })

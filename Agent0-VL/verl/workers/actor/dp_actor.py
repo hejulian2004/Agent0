@@ -16,6 +16,7 @@ Single Process Actor
 """
 
 import itertools
+from contextlib import nullcontext
 from typing import Iterable, Tuple
 
 import torch
@@ -36,6 +37,15 @@ from flash_attn.bert_padding import pad_input, unpad_input, rearrange, index_fir
 __all__ = ['DataParallelPPOActor']
 
 
+def _micro_batch_loss_scale(micro_batch_size: int, ppo_mini_batch_size: int) -> float:
+    """Return the sample-weighted PPO accumulation scale."""
+    if micro_batch_size <= 0 or ppo_mini_batch_size <= 0:
+        raise ValueError('micro-batch and PPO mini-batch sizes must be positive')
+    if micro_batch_size > ppo_mini_batch_size:
+        raise ValueError('micro-batch size cannot exceed PPO mini-batch size')
+    return micro_batch_size / ppo_mini_batch_size
+
+
 class DataParallelPPOActor(BasePPOActor):
 
     def __init__(
@@ -52,16 +62,19 @@ class DataParallelPPOActor(BasePPOActor):
         print(f'Actor use_remove_padding={self.use_remove_padding}')
         self.ulysses_sequence_parallel_size = self.config.ulysses_sequence_parallel_size
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
+        self.activation_cpu_offload = bool(self.config.get('activation_cpu_offload', False))
+        self.response_only_logits = bool(self.config.get('response_only_logits', False))
 
         self.compute_entropy_from_logits = (
             torch.compile(verl_F.entropy_from_logits, dynamic=True)
             if self.config.get('use_torch_compile', True)  #  use torch compile by default
             else verl_F.entropy_from_logits)
 
-    def _forward_micro_batch(self, micro_batch, temperature) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _forward_micro_batch(self, micro_batch, temperature,
+                             compute_entropy: bool = True) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Returns: 
-            entropy: # (bs, response_len)
+            entropy: # (bs, response_len), or None when not requested
             log_probs: # (bs, response_len)
         """
         response_length = micro_batch['responses'].size(-1)
@@ -71,7 +84,15 @@ class DataParallelPPOActor(BasePPOActor):
                 multi_modal_inputs[key] = torch.cat([inputs[key] for inputs in micro_batch['multi_modal_inputs']],
                                                     dim=0)
 
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+        # The two-GPU QLoRA actor already offloads parameters between phases.
+        # Save tensors needed for backward in host RAM while building the
+        # training graph; no-grad log-probability calls keep their fast path.
+        saved_tensor_context = (
+            torch.autograd.graph.save_on_cpu(pin_memory=False)
+            if self.activation_cpu_offload and torch.is_grad_enabled()
+            else nullcontext()
+        )
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16), saved_tensor_context:
             input_ids = micro_batch['input_ids']
             batch_size, seqlen = input_ids.shape
             attention_mask = micro_batch['attention_mask']
@@ -110,6 +131,24 @@ class DataParallelPPOActor(BasePPOActor):
                 model_kwargs = {}
                 if self.use_ulysses_sp and multi_modal_inputs:
                     model_kwargs["_verl_ulysses_sharded_multimodal"] = True
+                response_positions = None
+                if ((self.response_only_logits or not compute_entropy)
+                        and not self.use_ulysses_sp and batch_size == 1):
+                    # Log probability for a response token uses the logit at
+                    # the preceding position. Qwen2.5-VL can project only
+                    # those hidden states through its large LM head.
+                    response_start = seqlen - response_length
+                    response_positions = torch.nonzero(
+                        attention_mask[0, response_start:], as_tuple=False
+                    ).flatten() + response_start
+                    if response_positions.numel():
+                        preceding_positions = response_positions - 1
+                        logit_positions = torch.searchsorted(indices, preceding_positions)
+                        if (torch.any(preceding_positions < 0)
+                                or torch.any(logit_positions >= indices.numel())
+                                or not torch.equal(indices[logit_positions], preceding_positions)):
+                            raise ValueError('Response logits cannot be aligned with unpadded tokens')
+                        model_kwargs['logits_to_keep'] = logit_positions
                 output = self.actor_module(input_ids=input_ids_rmpad,
                                            attention_mask=None,
                                            position_ids=position_ids_rmpad,
@@ -120,8 +159,30 @@ class DataParallelPPOActor(BasePPOActor):
 
                 logits_rmpad.div_(temperature)
 
-                # compute entropy
-                entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)  # ((total_nnz / sp) + pad)
+                if response_positions is not None and response_positions.numel():
+                    labels = input_ids[0, response_positions]
+                    selected_entropy = (
+                        self.compute_entropy_from_logits(logits_rmpad)
+                        if compute_entropy else None
+                    )
+                    selected_log_probs = logprobs_from_logits(logits_rmpad, labels)
+                    response_indices = (response_positions - response_start).unsqueeze(0)
+                    entropy = None
+                    if selected_entropy is not None:
+                        entropy = torch.zeros(
+                            (1, response_length), device=logits_rmpad.device,
+                            dtype=selected_entropy.dtype,
+                        ).scatter(1, response_indices, selected_entropy.unsqueeze(0))
+                    log_probs = torch.zeros(
+                        (1, response_length), device=logits_rmpad.device,
+                        dtype=selected_log_probs.dtype,
+                    ).scatter(1, response_indices, selected_log_probs.unsqueeze(0))
+                    return entropy, log_probs
+
+                entropy_rmpad = (
+                    self.compute_entropy_from_logits(logits_rmpad)
+                    if compute_entropy else None
+                )
 
                 # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
                 log_probs = logprobs_from_logits(logits=logits_rmpad, labels=input_ids_rmpad_rolled)
@@ -130,23 +191,27 @@ class DataParallelPPOActor(BasePPOActor):
                 if self.use_ulysses_sp:
                     # gather and unpad for the ulysses sp
                     log_probs = gather_outpus_and_unpad(log_probs, gather_dim=0, unpad_dim=0, padding_size=pad_size)
-                    entropy_rmpad = gather_outpus_and_unpad(entropy_rmpad,
-                                                            gather_dim=0,
-                                                            unpad_dim=0,
-                                                            padding_size=pad_size)
+                    if entropy_rmpad is not None:
+                        entropy_rmpad = gather_outpus_and_unpad(entropy_rmpad,
+                                                                gather_dim=0,
+                                                                unpad_dim=0,
+                                                                padding_size=pad_size)
 
                 # pad back to (bsz, seqlen)
-                full_entropy = pad_input(hidden_states=entropy_rmpad.unsqueeze(-1),
-                                         indices=indices,
-                                         batch=batch_size,
-                                         seqlen=seqlen)
+                full_entropy = None
+                if entropy_rmpad is not None:
+                    full_entropy = pad_input(hidden_states=entropy_rmpad.unsqueeze(-1),
+                                             indices=indices,
+                                             batch=batch_size,
+                                             seqlen=seqlen)
                 full_log_probs = pad_input(hidden_states=log_probs.unsqueeze(-1),
                                            indices=indices,
                                            batch=batch_size,
                                            seqlen=seqlen)
 
                 # only return response part:
-                entropy = full_entropy.squeeze(-1)[:, -response_length - 1:-1]  # (bsz, response_length)
+                entropy = (full_entropy.squeeze(-1)[:, -response_length - 1:-1]
+                           if full_entropy is not None else None)
                 log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1:-1]  # (bsz, response_length)
 
             else:  # not using rmpad and no ulysses sp
@@ -159,7 +224,7 @@ class DataParallelPPOActor(BasePPOActor):
                 logits.div_(temperature)
                 logits = logits[:, -response_length - 1:-1, :]  # (bsz, response_length, vocab_size)
                 log_probs = logprobs_from_logits(logits, micro_batch['responses'])
-                entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
+                entropy = verl_F.entropy_from_logits(logits) if compute_entropy else None
 
             return entropy, log_probs
 
@@ -222,17 +287,24 @@ class DataParallelPPOActor(BasePPOActor):
         log_probs_lst = []
         for micro_batch in micro_batches:
             if isinstance(micro_batch, DataProto):
-                micro_batch = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+                micro_batch = {
+                    **micro_batch.batch.to(torch.cuda.current_device()),
+                    **micro_batch.non_tensor_batch,
+                }
+            else:
+                micro_batch = micro_batch.to(torch.cuda.current_device())
 
             with torch.no_grad():
-                _, log_probs = self._forward_micro_batch(micro_batch, temperature=temperature)
+                _, log_probs = self._forward_micro_batch(
+                    micro_batch, temperature=temperature, compute_entropy=False)
             log_probs_lst.append(log_probs)
         log_probs = torch.concat(log_probs_lst, dim=0)
 
         if use_dynamic_bsz and not has_multi_modal_inputs:
             indices = list(itertools.chain.from_iterable(indices))
             assert len(indices) == log_probs.size(0), f"{len(indices)} vs. {log_probs.size()}"
-            revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
+            revert_indices = torch.tensor(
+                get_reverse_idx(indices), dtype=torch.long, device=log_probs.device)
             log_probs = log_probs[revert_indices]
 
         return log_probs
@@ -280,9 +352,11 @@ class DataParallelPPOActor(BasePPOActor):
                 for data in micro_batches:
                     # Support all hardwares
                     if isinstance(data, DataProto):
+                        micro_batch_size = int(data.batch.batch_size[0])
                         data = {**data.batch.to(torch.cuda.current_device()), **data.non_tensor_batch}
                     else:
                         data = data.to(torch.cuda.current_device())  # actor device is cpu when using offload
+                        micro_batch_size = int(data.batch_size[0])
                     responses = data['responses']
                     response_length = responses.size(1)
                     attention_mask = data['attention_mask']
@@ -330,11 +404,22 @@ class DataParallelPPOActor(BasePPOActor):
                         metrics['actor/kl_coef'] = self.config.kl_loss_coef
 
                     if self.config.use_dynamic_bsz:
-                        # relative to the dynamic bsz
-                        loss = policy_loss * (len(data) / self.config.ppo_mini_batch_size)
+                        # Scale by the number of samples in this micro-batch.
+                        # For multimodal batches ``data`` is a plain dict at
+                        # this point, so ``len(data)`` is the number of fields
+                        # (nine in the Agent0 profile), not the batch size.
+                        loss = policy_loss * _micro_batch_loss_scale(
+                            micro_batch_size, self.config.ppo_mini_batch_size)
                     else:
                         loss = policy_loss / self.gradient_accumulation
-                    loss.backward()
+                    # Gradient checkpointing recomputes layers inside backward.
+                    # Keep the offload hook active for tensors saved there too.
+                    backward_saved_tensors = (
+                        torch.autograd.graph.save_on_cpu(pin_memory=False)
+                        if self.activation_cpu_offload else nullcontext()
+                    )
+                    with backward_saved_tensors:
+                        loss.backward()
 
                     data = {
                         'actor/entropy': entropy_loss.detach().item(),

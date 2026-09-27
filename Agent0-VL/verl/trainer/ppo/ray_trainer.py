@@ -452,7 +452,7 @@ class RayPPOTrainer(object):
 
         if config.data.get('val_batch_size', None) is not None:
             print(
-                f"WARNING: val_batch_size is deprecated. Validation datasets are sent to inference engines as a whole batch, which will schedule the memory themselves."
+                f"Validation will process up to {config.data.val_batch_size} examples per batch."
             )
 
         # check eval config
@@ -486,10 +486,15 @@ class RayPPOTrainer(object):
         else:
             sampler = SequentialSampler(data_source=self.train_dataset)
 
+        train_num_workers = int(self.config.data.get('train_num_workers', 8))
+        train_prefetch_factor = int(self.config.data.get('train_prefetch_factor', 2))
+        if train_num_workers < 0 or train_prefetch_factor <= 0:
+            raise ValueError('Invalid train loader workers/prefetch')
         self.train_dataloader = StatefulDataLoader(dataset=self.train_dataset,
                                                    batch_size=self.config.data.get('gen_batch_size',
                                                                                    self.config.data.train_batch_size),
-                                                   num_workers=8,
+                                                   num_workers=train_num_workers,
+                                                   prefetch_factor=train_prefetch_factor if train_num_workers else None,
                                                    drop_last=True,
                                                    collate_fn=collate_fn,
                                                    sampler=sampler)
@@ -508,22 +513,40 @@ class RayPPOTrainer(object):
         assert self.val_dataset.truncation == self.config.data.get(
             'truncation', 'error'
         ), f'dataset truncation {self.val_dataset.truncation} must be the same as config {self.config.data.get("truncation", "error")}'
+        val_batch_size = self.config.data.get('val_batch_size', None)
+        if val_batch_size is None:
+            # Preserve the historical whole-dataset behavior when unset.
+            val_batch_size = len(self.val_dataset)
+        else:
+            val_batch_size = int(val_batch_size)
+            if val_batch_size <= 0:
+                raise ValueError(f'data.val_batch_size must be positive, got {val_batch_size}')
+
+        val_num_workers = int(self.config.data.get('val_num_workers', 8))
+        val_prefetch_factor = int(self.config.data.get('val_prefetch_factor', 2))
+        if val_num_workers < 0:
+            raise ValueError(f'data.val_num_workers must be non-negative, got {val_num_workers}')
+        if val_num_workers > 0 and val_prefetch_factor <= 0:
+            raise ValueError(
+                f'data.val_prefetch_factor must be positive when val_num_workers > 0, '
+                f'got {val_prefetch_factor}')
+
         self.val_dataloader = StatefulDataLoader(
             dataset=self.val_dataset,
-            # Validation datasets are sent to inference engines as a whole batch,
-            # which will schedule the memory themselves.
-            batch_size=len(self.val_dataset),
-            num_workers=8,
+            # Chunk large evaluation sets so images and padded prompts do not
+            # all need to reside in one host-side batch at once.
+            batch_size=min(val_batch_size, len(self.val_dataset)),
+            num_workers=val_num_workers,
+            prefetch_factor=val_prefetch_factor if val_num_workers > 0 else None,
             shuffle=False,
             drop_last=False,
             collate_fn=collate_fn)
 
         assert len(self.train_dataloader) >= 1
-        assert len(
-            self.val_dataloader
-        ) == 1, "Validation dataloader must have a single batch, which inference engines will schedule the memory themselves."
+        assert len(self.val_dataloader) >= 1, 'Validation dataset must contain at least one batch.'
 
         print(f'Size of train dataloader: {len(self.train_dataloader)}')
+        print(f'Size of validation dataloader: {len(self.val_dataloader)}')
 
         # inject total_training_steps to actor/critic optim_config. This is hacky.
         total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
@@ -569,7 +592,8 @@ class RayPPOTrainer(object):
 
         # Lists to collect samples for the table
         sample_inputs = []
-        sample_outputs = []
+        log_val_generations = self.config.trainer.log_val_generations > 0
+        sample_outputs = [] if log_val_generations else None
         sample_scores = []
         
         metric_dict = {}
@@ -625,10 +649,12 @@ class RayPPOTrainer(object):
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
             print('validation generation end')
 
-            # Store generated outputs
-            output_ids = test_output_gen_batch.batch['responses']
-            output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
-            sample_outputs.extend(output_texts)
+            # Keep decoded generations only when they will be logged. The
+            # reward manager already retains the response strings for export.
+            if log_val_generations:
+                output_ids = test_output_gen_batch.batch['responses']
+                output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
+                sample_outputs.extend(output_texts)
 
             test_batch = test_batch.union(test_output_gen_batch)
 
@@ -658,7 +684,8 @@ class RayPPOTrainer(object):
 
             data_source_lst.append(test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0]))
 
-        self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
+        if log_val_generations:
+            self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
         for key_info, lst in reward_extra_infos_dict.items():
             assert len(lst) == 0 or len(lst) == len(sample_scores), f"{key_info}: {len(lst)=}, {len(sample_scores)=}"
@@ -826,13 +853,17 @@ class RayPPOTrainer(object):
         # save dataloader
         dataloader_local_path = os.path.join(local_global_step_folder, 'data.pt')
         dataloader_state_dict = self.train_dataloader.state_dict()
-        torch.save(dataloader_state_dict, dataloader_local_path)
+        torch.save(dataloader_state_dict, dataloader_local_path + '.tmp')
+        os.replace(dataloader_local_path + '.tmp', dataloader_local_path)
+        with open(os.path.join(local_global_step_folder, 'train_data_source.txt'), 'w') as f:
+            f.write(str(self.config.data.train_files))
 
         # latest checkpointed iteration tracker (for atomic usage)
         local_latest_checkpointed_iteration = os.path.join(self.config.trainer.default_local_dir,
                                                            'latest_checkpointed_iteration.txt')
-        with open(local_latest_checkpointed_iteration, 'w') as f:
+        with open(local_latest_checkpointed_iteration + '.tmp', 'w') as f:
             f.write(str(self.global_steps))
+        os.replace(local_latest_checkpointed_iteration + '.tmp', local_latest_checkpointed_iteration)
 
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == 'disable':
@@ -881,7 +912,14 @@ class RayPPOTrainer(object):
         # load dataloader,
         # TODO: from remote not implemented yet
         dataloader_local_path = os.path.join(global_step_folder, 'data.pt')
-        if os.path.exists(dataloader_local_path):
+        source_path = os.path.join(global_step_folder, 'train_data_source.txt')
+        same_data = True
+        if os.path.exists(source_path):
+            with open(source_path) as f:
+                same_data = f.read() == str(self.config.data.train_files)
+        if not same_data:
+            print('Training dataset changed: retain actor/optimizer state, start a fresh dataloader')
+        elif os.path.exists(dataloader_local_path):
             dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
             self.train_dataloader.load_state_dict(dataloader_state_dict)
         else:

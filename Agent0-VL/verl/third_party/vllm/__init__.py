@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 from importlib.metadata import version, PackageNotFoundError
 from packaging import version as vs
 from verl.utils.import_utils import is_sglang_available
@@ -27,6 +28,28 @@ def get_version(pkg):
 package_name = 'vllm'
 package_version = get_version(package_name)
 vllm_version = None
+
+
+def vllm_mm_cache_kwargs():
+    """Return the multimodal-cache option supported by the installed vLLM.
+
+    vLLM 0.8 exposed ``disable_mm_preprocessor_cache``.  Newer releases
+    replaced it with the size-based ``mm_processor_cache_gb`` setting.  Keep
+    the cache disabled for the memory-constrained RL rollout without passing
+    a removed keyword to the newer EngineArgs API.
+    """
+    try:
+        from vllm.engine.arg_utils import EngineArgs
+
+        parameters = inspect.signature(EngineArgs).parameters
+    except (ImportError, TypeError, ValueError):
+        return {'disable_mm_preprocessor_cache': True}
+
+    if 'disable_mm_preprocessor_cache' in parameters:
+        return {'disable_mm_preprocessor_cache': True}
+    if 'mm_processor_cache_gb' in parameters:
+        return {'mm_processor_cache_gb': 0}
+    return {}
 
 if package_version == '0.3.1':
     vllm_version = '0.3.1'
@@ -57,6 +80,10 @@ elif vs.parse(package_version) >= vs.parse('0.7.0'):
     # From 0.6.6.post2 on, vllm supports SPMD inference
     # See https://github.com/vllm-project/vllm/pull/12071
 
+    # Keep the concrete version available to callers.  The old code left this
+    # as None for every modern vLLM release, which made version-specific
+    # compatibility branches ambiguous after upgrading vLLM.
+    vllm_version = package_version
     from vllm import LLM
     from vllm.distributed import parallel_state
 else:

@@ -79,12 +79,15 @@ class FlopsCounter:
         return 0
 
     def _estimate_qwen2_flops(self, tokens_sum, batch_seqlens, delta_time):
-        hidden_size = self.config.hidden_size
-        vocab_size = self.config.vocab_size
-        num_hidden_layers = self.config.num_hidden_layers
-        num_key_value_heads = self.config.num_key_value_heads
-        num_attention_heads = self.config.num_attention_heads
-        intermediate_size = self.config.intermediate_size
+        # Recent Transformers versions keep Qwen-VL language dimensions in
+        # text_config instead of exposing them on the multimodal root config.
+        config = getattr(self.config, 'text_config', None) or self.config
+        hidden_size = config.hidden_size
+        vocab_size = config.vocab_size
+        num_hidden_layers = config.num_hidden_layers
+        num_key_value_heads = config.num_key_value_heads
+        num_attention_heads = config.num_attention_heads
+        intermediate_size = config.intermediate_size
 
         head_dim = hidden_size // num_attention_heads
         q_size = num_attention_heads * head_dim

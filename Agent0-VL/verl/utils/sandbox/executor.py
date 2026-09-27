@@ -50,6 +50,20 @@ try:
 except ImportError:
     cv2 = None
 
+try:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+except Exception:  # pragma: no cover - optional image dependency
+    matplotlib = None
+    plt = None
+
+try:
+    import pytesseract
+except Exception:  # pragma: no cover - optional OCR dependency
+    pytesseract = None
+
 
 # Timeout support. ``timeout_decorator`` is preferred, but it is an optional
 # dependency: when it is not installed we fall back to a thread-based timeout so
@@ -132,8 +146,9 @@ DANGEROUS_PATTERNS = [
     r'\bos\.(rename|renames)\b',
 ]
 
-# Execution time limit (seconds)
-EXEC_TIME_LIMIT = 10
+# Default execution time limit (seconds). Callers may override this per
+# snippet through ``execute_code_in_sandbox(..., timeout=...)``.
+EXEC_TIME_LIMIT = 60
 
 # Temporary directory for processed images
 TEMP_PROCESSED_IMAGES_DIR = "./temp_processed_images/"
@@ -440,7 +455,6 @@ def _make_restricted_os():
     return restricted
 
 
-@_timeout(EXEC_TIME_LIMIT)
 def _sandboxed_execution_target(
     code_to_execute: str,
     input_image_path: Optional[str],
@@ -519,6 +533,11 @@ def _sandboxed_execution_target(
 
     if cv2:
         sandbox_globals["cv2"] = cv2
+    if matplotlib is not None and plt is not None:
+        sandbox_globals["matplotlib"] = matplotlib
+        sandbox_globals["plt"] = plt
+    if pytesseract is not None:
+        sandbox_globals["pytesseract"] = pytesseract
 
     sandbox_globals_always = sandbox_globals
     sandbox_locals = {
@@ -716,7 +735,12 @@ def execute_code_in_sandbox(
 
     with ReadOnlyPath(input_image_path):
         try:
-            result_dict = _sandboxed_execution_target(
+            # Apply the requested timeout at the call site. The old decorator
+            # was bound to EXEC_TIME_LIMIT at import time, so a larger timeout
+            # only changed the error message while image tools were still
+            # killed at the old hard-coded limit.
+            execution_target = _timeout(max(1, int(timeout)))(_sandboxed_execution_target)
+            result_dict = execution_target(
                 code_to_execute,
                 input_image_path,
                 temp_output_dir,

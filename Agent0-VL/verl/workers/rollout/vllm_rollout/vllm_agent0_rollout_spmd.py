@@ -36,6 +36,7 @@ import numpy as np
 import re
 import json
 import os
+import time
 from typing import List, Dict, Any, Optional, Union
 
 from omegaconf import DictConfig
@@ -44,7 +45,11 @@ import torch.distributed
 from tensordict import TensorDict
 from verl import DataProto
 from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
-from verl.workers.rollout.vllm_rollout.vllm_rollout_spmd import vLLMRollout
+from verl.utils.reward_score.paper_eval import extract_boxed_answer
+from verl.workers.rollout.vllm_rollout.vllm_rollout_spmd import (
+    get_model_max_position_embeddings,
+    vLLMRollout,
+)
 from verl.third_party.vllm import vllm_version
 
 # Sandbox for tool execution. `sandbox.local_sandbox` talks to an HTTP
@@ -108,8 +113,17 @@ class vLLMAgent0Rollout(vLLMRollout):
                                                         config.get('enable_step_verification', True)))
         self.enable_self_repair = bool(config.get('enable_self_repair', True))
         self.max_obs_length = int(config.get('max_obs_length', 512))
-        self.sandbox_timeout = int(config.get('sandbox_timeout', 10))
+        self.sandbox_timeout = int(config.get('sandbox_timeout', 60))
         self.max_repairs_per_trajectory = int(config.get('max_repairs_per_trajectory', 2))
+        self.verbose_logging = os.getenv('AGENT0_ROLLOUT_VERBOSE', '0').lower() in {
+            '1', 'true', 'yes', 'on'
+        }
+        # Emit a small, bounded sample of generated text per local rollout
+        # batch when verbose rollout logging is enabled. The launcher sets
+        # these values so training logs show actual model behavior, not only
+        # step timings.
+        self.log_sample_count = max(0, int(os.getenv('AGENT0_ROLLOUT_LOG_SAMPLES', '0')))
+        self.log_sample_max_chars = max(100, int(os.getenv('AGENT0_ROLLOUT_LOG_MAX_CHARS', '1200')))
 
         # The whole trajectory (all steps' Solver / tool-observation / Verifier /
         # repair tokens) is written into a single response buffer bounded by
@@ -129,7 +143,8 @@ class vLLMAgent0Rollout(vLLMRollout):
             desired = config.prompt_length + extended_response_length
         else:
             desired = max(int(original_max_model_len), config.prompt_length + config.response_length)
-        config.max_model_len = min(desired, model_hf_config.max_position_embeddings)
+        model_max_position_embeddings = get_model_max_position_embeddings(model_hf_config)
+        config.max_model_len = min(desired, model_max_position_embeddings)
 
         # vLLM (and verl's base rollout) require max_num_batched_tokens >=
         # max_model_len when chunked prefill is enabled. The multi-turn budget
@@ -156,16 +171,38 @@ class vLLMAgent0Rollout(vLLMRollout):
         vocab_config = text_config if text_config is not None else model_hf_config
         model_vocab_size = int(getattr(vocab_config, 'vocab_size', valid_vocab_size))
         if valid_vocab_size < model_vocab_size:
-            if not hasattr(self.sampling_params, 'allowed_token_ids'):
+            invalid_token_ids = list(range(valid_vocab_size, model_vocab_size))
+            # vLLM V1 limits both allowed_token_ids and logit_bias to 1024
+            # entries. The valid vocabulary is much larger than that, while
+            # the padded tail in Qwen checkpoints is small (399 ids here).
+            # Bias only the padded tail instead of constructing a huge
+            # allow-list. -100 is vLLM's strongest supported negative bias and
+            # is effectively zero probability for normal model logits.
+            if hasattr(self.sampling_params, 'logit_bias'):
+                logit_bias = dict(self.sampling_params.logit_bias or {})
+                if len(logit_bias) + len(invalid_token_ids) > 1024:
+                    raise RuntimeError(
+                        'The padded vocabulary tail is too large for vLLM '
+                        'V1 logit_bias (maximum 1024 entries).'
+                    )
+                logit_bias.update({token_id: -100.0 for token_id in invalid_token_ids})
+                self.sampling_params.logit_bias = logit_bias
+                mask_mode = 'logit_bias'
+            elif hasattr(self.sampling_params, 'allowed_token_ids') and valid_vocab_size <= 1024:
+                # Compatibility fallback for old vLLM releases where the
+                # valid vocabulary itself fits the allow-list limit.
+                self.sampling_params.allowed_token_ids = list(range(valid_vocab_size))
+                mask_mode = 'allowed_token_ids'
+            else:
                 raise RuntimeError(
-                    'This vLLM version does not support allowed_token_ids; '
-                    'cannot safely sample from a padded Qwen vocabulary.'
+                    'This vLLM version cannot safely mask the padded Qwen '
+                    'vocabulary within its token-ID limit.'
                 )
-            self.sampling_params.allowed_token_ids = list(range(valid_vocab_size))
             print(
                 'Agent0-VL rollout: masked padded vocabulary ids '
                 f'{valid_vocab_size}:{model_vocab_size - 1} '
-                f'(tokenizer_vocab={valid_vocab_size}, model_vocab={model_vocab_size})'
+                f'(tokenizer_vocab={valid_vocab_size}, model_vocab={model_vocab_size}, '
+                f'mode={mask_mode})'
             )
 
         self.tokenizer = tokenizer
@@ -185,7 +222,13 @@ class vLLMAgent0Rollout(vLLMRollout):
         print(f"Agent0-VL Rollout initialized: max_steps={self.max_reasoning_steps}, "
               f"repair_threshold={self.repair_threshold}, tools={self.enable_tool_execution}, "
               f"verification={self.enable_step_verification}, self_repair={self.enable_self_repair}, "
-              f"sandbox_available={SANDBOX_AVAILABLE}, max_model_len={self.config.max_model_len}")
+              f"sandbox_available={SANDBOX_AVAILABLE}, max_model_len={self.config.max_model_len}, "
+              f"verbose_logging={self.verbose_logging}")
+
+    def _progress_log(self, message: str) -> None:
+        """Emit rollout progress without changing the rollout algorithm."""
+        if self.verbose_logging:
+            print(f"[Agent0-VL rollout pid={os.getpid()}] {message}", flush=True)
 
     # ------------------------------------------------------------------
     # Prompt templates (aligned with the paper's Appendix C system prompts)
@@ -195,6 +238,8 @@ class vLLMAgent0Rollout(vLLMRollout):
 
         JSON braces are escaped as ``{{ }}`` for use with ``str.format``.
         """
+        self.tool_observation_prompt_template = "{observation}"
+        self.solver_continue_prompt_template = "Continue solving the problem using the conversation so far."
         self.verifier_prompt_template = """Now switch to the Verifier role. Verify the reasoning step above using the available evidence.
 
 Step to evaluate:
@@ -232,7 +277,8 @@ or:
 
 Switch back to the Solver role. Re-derive the corrected reasoning step applying this patch, then continue toward the final answer."""
 
-    def _get_template_tokens(self, template_key: str, **kwargs) -> List[int]:
+    def _get_template_tokens(self, template_key: str,
+                             add_generation_prompt: bool = True, **kwargs) -> List[int]:
         """Convert prompt template to token ids with variable substitution"""
         template = getattr(self, f"{template_key}_prompt_template", "")
         try:
@@ -243,7 +289,7 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
 
         messages = [{"role": "user", "content": formatted}]
         chat_template = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
+            messages, tokenize=False, add_generation_prompt=add_generation_prompt
         )
 
         # Remove the duplicated system prompt that apply_chat_template inserts
@@ -254,7 +300,6 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
         if chat_template.startswith("<|begin_of_sentence|>"):
             chat_template = chat_template[len("<|begin_of_sentence|>"):]
 
-        chat_template = "\n\n" + chat_template
         return self.tokenizer.encode(chat_template, add_special_tokens=False)
 
     # ------------------------------------------------------------------
@@ -295,10 +340,20 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
 
     def _extract_final_answer(self, text: str) -> Optional[str]:
         """Extract final answer from solver output"""
-        boxed_pattern = r"\\boxed\{([^}]+)\}"
-        matches = re.findall(boxed_pattern, text)
-        if matches:
-            return matches[-1].strip()
+        answers = []
+        for match in re.finditer(r"\\boxed\{", text):
+            start = match.end()
+            depth = 1
+            for end in range(start, len(text)):
+                if text[end] == '{':
+                    depth += 1
+                elif text[end] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        answers.append(text[start:end].strip())
+                        break
+        if answers:
+            return answers[-1]
 
         final_pattern = r"FINAL_ANSWER:\s*(.+?)(?:\n|$)"
         matches = re.findall(final_pattern, text, re.IGNORECASE)
@@ -311,11 +366,20 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
     # ------------------------------------------------------------------
     def _parse_verification_output(self, text: str) -> Optional[Dict[str, Any]]:
         """Parse verification JSON from verifier output"""
-        json_pattern = r'\{[^{}]*"step_index"[^{}]*\}'
-        matches = re.findall(json_pattern, text, re.DOTALL)
-        if matches:
+        decoder = json.JSONDecoder()
+        values = []
+        for index, char in enumerate(text):
+            if char != '{':
+                continue
             try:
-                verification = json.loads(matches[-1])
+                value, _ = decoder.raw_decode(text, index)
+                if isinstance(value, dict) and "step_index" in value:
+                    values.append(value)
+            except json.JSONDecodeError:
+                continue
+        if values:
+            try:
+                verification = values[-1]
                 required = ['step_index', 'score', 'confidence']
                 if all(k in verification for k in required):
                     verification['score'] = max(-1.0, min(1.0, float(verification.get('score', 0))))
@@ -327,11 +391,20 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
 
     def _parse_repair_instruction(self, text: str) -> Optional[Dict[str, Any]]:
         """Parse repair instruction JSON from repair output"""
-        json_pattern = r'\{[^{}]*"action"[^{}]*\}'
-        matches = re.findall(json_pattern, text, re.DOTALL)
-        if matches:
+        decoder = json.JSONDecoder()
+        values = []
+        for index, char in enumerate(text):
+            if char != '{':
+                continue
             try:
-                repair = json.loads(matches[-1])
+                value, _ = decoder.raw_decode(text, index)
+                if isinstance(value, dict) and "action" in value:
+                    values.append(value)
+            except json.JSONDecodeError:
+                continue
+        if values:
+            try:
+                repair = values[-1]
                 if repair.get('action') in ['PATCH', 'NO_CHANGE']:
                     return repair
             except json.JSONDecodeError:
@@ -355,11 +428,18 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
         idx = prompts.batch['input_ids']
         attention_mask = prompts.batch['attention_mask']
         position_ids = prompts.batch['position_ids']
-        eos_token_id = prompts.meta_info.get('eos_token_id', self.tokenizer.eos_token_id)
+        # generation_config.eos_token_id may be a list of stopping tokens
+        # (Qwen2.5-VL uses [<|im_end|>, <|endoftext|>]). A chat turn needs
+        # the single <|im_end|> token, not that list.
+        chat_end_token_id = self.tokenizer.convert_tokens_to_ids('<|im_end|>')
+        if not isinstance(chat_end_token_id, int) or chat_end_token_id < 0:
+            raise ValueError('Agent0 rollout requires a tokenizer with <|im_end|>')
 
         batch_size = idx.size(0)
         do_sample = prompts.meta_info.get('do_sample', True)
         is_validate = prompts.meta_info.get('validate', False)
+        rollout_started_at = time.monotonic()
+        original_batch_size = int(batch_size)
 
         non_tensor_batch = dict(prompts.non_tensor_batch)
 
@@ -386,6 +466,11 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
             batch_size = batch_size * n_repeat
             for key in list(non_tensor_batch.keys()):
                 non_tensor_batch[key] = _repeat_interleave(non_tensor_batch[key], n_repeat)
+
+        self._progress_log(
+            f"start prompts={original_batch_size} expanded_batch={batch_size} "
+            f"n={n_repeat} validate={is_validate} max_steps={self.max_reasoning_steps}"
+        )
 
         # Build vLLM prompt token ids. For multimodal models the raw
         # (unexpanded) prompt ids must be used; the expanded ``input_ids`` are
@@ -415,6 +500,9 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
         num_steps = [0] * batch_size
         num_repairs = [0] * batch_size
         active_samples = list(range(batch_size))
+        pending_tool_result = [False] * batch_size
+        assistant_start_tokens = self.tokenizer.encode(
+            '<|im_start|>assistant\n', add_special_tokens=False)
 
         verify_kwargs = dict(sample_kwargs)
 
@@ -437,6 +525,14 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
             current_positions[global_idx] = pos + len(tokens)
             return len(tokens)
 
+        def _append_user_turn(global_idx: int, tokens: List[int]) -> int:
+            """Close the previous assistant turn before adding a chat-formatted user turn."""
+            if current_inputs[global_idx] and current_inputs[global_idx][-1] != chat_end_token_id:
+                tokens = [chat_end_token_id] + tokens
+            written = _append_tokens(global_idx, tokens, trainable=False)
+            current_inputs[global_idx].extend(tokens[:written])
+            return written
+
         def _has_room(global_idx: int, needed: int) -> bool:
             """Whether the sample still has response-buffer and model-window room."""
             if current_positions[global_idx] + needed > max_total_length:
@@ -444,15 +540,21 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
             ctx_len = len(current_inputs[global_idx]) + needed
             return ctx_len < int(self.config.max_model_len) - 8
 
-        def _batched_generate(vllm_inputs: List[dict], gen_kwargs: dict) -> List:
+        def _batched_generate(vllm_inputs: List[dict], gen_kwargs: dict, label: str) -> List:
             """Run vLLM generation with a per-call max_tokens that fits the window."""
             max_input_len = max(len(v['prompt_token_ids']) for v in vllm_inputs)
             room = int(self.config.max_model_len) - max_input_len - 8
             call_kwargs = dict(gen_kwargs)
             call_kwargs['max_tokens'] = max(16, min(self.config.response_length, room))
+            self._progress_log(
+                f"generate_start label={label} requests={len(vllm_inputs)} "
+                f"max_input_tokens={max_input_len} max_tokens={call_kwargs['max_tokens']}"
+            )
             with self.update_sampling_params(**call_kwargs):
-                return self.inference_engine.generate(
+                outputs = self.inference_engine.generate(
                     prompts=vllm_inputs, sampling_params=self.sampling_params, use_tqdm=False)
+            self._progress_log(f"generate_done label={label} requests={len(vllm_inputs)}")
+            return outputs
 
         def _build_vllm_inputs(sample_indices: List[int]) -> List[dict]:
             inputs = []
@@ -469,14 +571,34 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
             active_samples = [g for g in active_samples
                               if _has_room(g, min(256, self.config.response_length))]
             if not active_samples:
+                self._progress_log(
+                    f"stop_no_active step={step_idx + 1} elapsed={time.monotonic() - rollout_started_at:.1f}s"
+                )
                 break
+            if step_idx > 0:
+                for g in active_samples:
+                    if pending_tool_result[g]:
+                        written = _append_tokens(g, assistant_start_tokens, trainable=False)
+                        current_inputs[g].extend(assistant_start_tokens[:written])
+                        pending_tool_result[g] = False
+                    else:
+                        _append_user_turn(g, self._get_template_tokens('solver_continue'))
+            step_active_count = len(active_samples)
+            self._progress_log(
+                f"step_start step={step_idx + 1}/{self.max_reasoning_steps} "
+                f"active={step_active_count}"
+            )
 
             # --- Step 1: Solver generates a reasoning step ---
-            solver_outputs = _batched_generate(_build_vllm_inputs(active_samples), sample_kwargs)
+            solver_outputs = _batched_generate(
+                _build_vllm_inputs(active_samples), sample_kwargs,
+                label=f"solver step={step_idx + 1}")
 
             solver_text_by_g: Dict[int, str] = {}
             tool_output_by_g: Dict[int, str] = {}
             tool_success_by_g: Dict[int, bool] = {}
+            tool_call_count_by_g: Dict[int, int] = {}
+            successful_tool_call_count_by_g: Dict[int, int] = {}
             newly_completed = []
 
             solver_responses = [list(output.outputs[0].token_ids) for output in solver_outputs]
@@ -490,14 +612,19 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
 
                 solver_text = self.tokenizer.decode(tokens[:written], skip_special_tokens=True)
                 solver_text_by_g[global_idx] = solver_text
+                pending_tool_result[global_idx] = False
 
                 final_answer = self._extract_final_answer(solver_text)
                 if final_answer is not None:
                     final_answers[global_idx] = final_answer
                     newly_completed.append(global_idx)
+            self._progress_log(
+                f"solver_done step={step_idx + 1} requests={step_active_count} "
+                f"completed={len(newly_completed)}"
+            )
 
             # --- Step 2: Execute tools for still-active samples ---
-            exec_candidates = [g for g in active_samples if g not in newly_completed]
+            exec_candidates = list(active_samples)
             if self.enable_tool_execution and exec_candidates:
                 code_blocks_batch = []
                 samples_with_code = []
@@ -508,6 +635,10 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
                         samples_with_code.append((g, len(code_blocks)))
 
                 if code_blocks_batch:
+                    self._progress_log(
+                        f"tool_start step={step_idx + 1} samples={len(samples_with_code)} "
+                        f"blocks={len(code_blocks_batch)}"
+                    )
                     exec_results = self._execute_code_in_sandbox(code_blocks_batch)
                     result_idx = 0
                     for g, num_blocks in samples_with_code:
@@ -515,29 +646,39 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
                         result_idx += num_blocks
 
                         tool_output_text = "\n[Code Execution Result]\n"
-                        any_success = False
+                        successful_calls = sum(bool(result.get('success', False)) for result in sample_results)
+                        any_success = successful_calls > 0
                         for result in sample_results:
                             if result['stderr']:
                                 tool_output_text += f"Error: {result['stderr']}\n"
                             elif result['stdout']:
                                 tool_output_text += f"Output: {result['stdout']}\n"
-                                any_success = any_success or result['success']
                             else:
                                 tool_output_text += "No output\n"
-                                any_success = any_success or result['success']
 
+                        tool_call_count_by_g[g] = len(sample_results)
+                        successful_tool_call_count_by_g[g] = successful_calls
                         tool_success_by_g[g] = any_success
                         tool_output_by_g[g] = tool_output_text
 
-                        tool_tokens = self.tokenizer.encode(tool_output_text, add_special_tokens=False)
-                        tool_tokens = tool_tokens[:self.max_obs_length]
-                        written = _append_tokens(g, tool_tokens, trainable=False)
-                        current_inputs[g].extend(tool_tokens[:written])
+                        observation_ids = self.tokenizer.encode(
+                            tool_output_text, add_special_tokens=False)[:self.max_obs_length]
+                        observation = self.tokenizer.decode(
+                            observation_ids, skip_special_tokens=False)
+                        tool_tokens = self._get_template_tokens(
+                            'tool_observation', add_generation_prompt=False,
+                            observation=observation)
+                        _append_user_turn(g, tool_tokens)
+                        pending_tool_result[g] = True
 
                         # A tool result may print the boxed final answer
                         boxed = self._extract_final_answer(tool_output_text)
                         if boxed is not None and final_answers[g] is None:
                             final_answers[g] = boxed
+                    self._progress_log(
+                        f"tool_done step={step_idx + 1} samples={len(samples_with_code)} "
+                        f"successes={sum(bool(tool_success_by_g.get(g, False)) for g, _ in samples_with_code)}"
+                    )
 
             # --- Step 3: Verifier evaluates the step ---
             verification_by_g: Dict[int, Optional[Dict[str, Any]]] = {}
@@ -551,10 +692,12 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
                         tool_outputs=truncate_content(tool_output_by_g.get(g, "None"), 1000),
                         step_index=step_idx + 1,
                     )
-                    written = _append_tokens(g, verify_prompt_tokens, trainable=False)
-                    current_inputs[g].extend(verify_prompt_tokens[:written])
+                    _append_user_turn(g, verify_prompt_tokens)
+                    pending_tool_result[g] = False
 
-                verify_outputs = _batched_generate(_build_vllm_inputs(verify_candidates), verify_kwargs)
+                verify_outputs = _batched_generate(
+                    _build_vllm_inputs(verify_candidates), verify_kwargs,
+                    label=f"verifier step={step_idx + 1}")
 
                 for local_idx, g in enumerate(verify_candidates):
                     tokens = list(verify_outputs[local_idx].outputs[0].token_ids)
@@ -567,6 +710,11 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
 
                     verify_prob = verification.get('confidence', 0.5) if verification else 0.5
                     verify_probs[g].append(float(verify_prob))
+                valid_verifications = sum(value is not None for value in verification_by_g.values())
+                self._progress_log(
+                    f"verifier_done step={step_idx + 1} requests={len(verify_candidates)} "
+                    f"parsed={valid_verifications}"
+                )
 
             # --- Step 4: Confidence-gated self-repair ---
             repair_candidates = []
@@ -581,8 +729,18 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
                             and _has_room(g, 512)):
                         repair_candidates.append(g)
 
+            initial_verification_by_g = dict(verification_by_g)
+            repair_pre_verification_by_g = {
+                g: verification_by_g.get(g) for g in repair_candidates
+            }
+            reverification_by_g: Dict[int, Optional[Dict[str, Any]]] = {}
+            repair_success_by_g: Dict[int, bool] = {}
+            repair_score_improved_by_g: Dict[int, bool] = {}
             repaired_by_g: Dict[int, bool] = {}
             if repair_candidates:
+                self._progress_log(
+                    f"repair_start step={step_idx + 1} candidates={len(repair_candidates)}"
+                )
                 # 4a: generate repair instructions
                 for g in repair_candidates:
                     verification = verification_by_g.get(g)
@@ -595,10 +753,11 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
                         original_step=truncate_content(solver_text_by_g.get(g, ""), 1000),
                         step_index=step_idx + 1,
                     )
-                    written = _append_tokens(g, repair_prompt_tokens, trainable=False)
-                    current_inputs[g].extend(repair_prompt_tokens[:written])
+                    _append_user_turn(g, repair_prompt_tokens)
 
-                repair_outputs = _batched_generate(_build_vllm_inputs(repair_candidates), sample_kwargs)
+                repair_outputs = _batched_generate(
+                    _build_vllm_inputs(repair_candidates), sample_kwargs,
+                    label=f"repair step={step_idx + 1}")
 
                 regen_candidates = []
                 for local_idx, g in enumerate(repair_candidates):
@@ -618,11 +777,12 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
                             "regenerate",
                             repair_instruction=truncate_content(json.dumps(repair, ensure_ascii=False), 800),
                         )
-                        written = _append_tokens(g, regen_prompt_tokens, trainable=False)
-                        current_inputs[g].extend(regen_prompt_tokens[:written])
+                        _append_user_turn(g, regen_prompt_tokens)
 
                     regen_indices = [g for g, _ in regen_candidates]
-                    regen_outputs = _batched_generate(_build_vllm_inputs(regen_indices), sample_kwargs)
+                    regen_outputs = _batched_generate(
+                        _build_vllm_inputs(regen_indices), sample_kwargs,
+                        label=f"regenerate step={step_idx + 1}")
 
                     for local_idx, g in enumerate(regen_indices):
                         tokens = list(regen_outputs[local_idx].outputs[0].token_ids)
@@ -634,11 +794,72 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
                         num_repairs[g] += 1
                         repaired_by_g[g] = True
 
+                        # Reverification must inspect evidence from the corrected code.
+                        tool_output_by_g.pop(g, None)
+                        tool_success_by_g[g] = False
+                        blocks = self._extract_code_blocks(regen_text) if self.enable_tool_execution else []
+                        if blocks:
+                            results = self._execute_code_in_sandbox(blocks)
+                            tool_output = "\n[Code Execution Result]\n" + "".join(
+                                f"Error: {r['stderr']}\n" if r['stderr'] else
+                                f"Output: {r['stdout']}\n" if r['stdout'] else "No output\n"
+                                for r in results)
+                            successes = sum(bool(r.get('success')) for r in results)
+                            tool_call_count_by_g[g] = tool_call_count_by_g.get(g, 0) + len(results)
+                            successful_tool_call_count_by_g[g] = successful_tool_call_count_by_g.get(g, 0) + successes
+                            tool_success_by_g[g] = successes > 0
+                            tool_output_by_g[g] = tool_output
+                            obs_ids = self.tokenizer.encode(tool_output, add_special_tokens=False)[:self.max_obs_length]
+                            _append_user_turn(g, self._get_template_tokens(
+                                'tool_observation', add_generation_prompt=False,
+                                observation=self.tokenizer.decode(obs_ids, skip_special_tokens=False)))
+
                         final_answer = self._extract_final_answer(regen_text)
                         if final_answer is not None:
                             final_answers[g] = final_answer
                             if g not in newly_completed:
                                 newly_completed.append(g)
+
+                    # The repaired segment must be evaluated again.  The
+                    # paper's repair loop uses the post-repair verifier result
+                    # for the process reward; retaining the pre-repair score
+                    # would reward an unverified correction.
+                    if self.enable_step_verification and regen_indices:
+                        for g, _ in regen_candidates:
+                            verify_prompt_tokens = self._get_template_tokens(
+                                "verifier",
+                                step_content=truncate_content(solver_text_by_g.get(g, ""), 2000),
+                                tool_outputs=truncate_content(tool_output_by_g.get(g, "None"), 1000),
+                                step_index=step_idx + 1,
+                            )
+                            _append_user_turn(g, verify_prompt_tokens)
+                        reverify_outputs = _batched_generate(
+                            _build_vllm_inputs(regen_indices), verify_kwargs,
+                            label=f"reverify step={step_idx + 1}")
+                        for local_idx, g in enumerate(regen_indices):
+                            tokens = list(reverify_outputs[local_idx].outputs[0].token_ids)
+                            written = _append_tokens(g, tokens, trainable=True)
+                            current_inputs[g].extend(tokens[:written])
+                            reverified = self._parse_verification_output(
+                                self.tokenizer.decode(tokens[:written], skip_special_tokens=True))
+                            reverification_by_g[g] = reverified
+                            verification_by_g[g] = reverified
+                            if reverified is not None:
+                                repair_success_by_g[g] = (
+                                    float(reverified.get('confidence', 0.5)) >= self.repair_threshold
+                                )
+                                original_verification = repair_pre_verification_by_g.get(g)
+                                original_score = (
+                                    float(original_verification.get('score', 0.0))
+                                    if original_verification else 0.0
+                                )
+                                repair_score_improved_by_g[g] = (
+                                    float(reverified.get('score', 0.0)) > original_score
+                                )
+                self._progress_log(
+                    f"repair_done step={step_idx + 1} candidates={len(repair_candidates)} "
+                    f"regenerated={len(regen_candidates)}"
+                )
 
             # --- Record per-step data for the reward manager ---
             for g in active_samples:
@@ -648,14 +869,31 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
                     'score': float(verification.get('score', 0.0)) if verification else 0.0,
                     'confidence': float(verification.get('confidence', 0.5)) if verification else 0.5,
                     'verified': verification is not None,
+                    'verifier_triggered': g in verify_candidates,
+                    'verifier_calls': int(g in verify_candidates) + int(g in reverification_by_g),
+                    'verifier_successful_calls': int(initial_verification_by_g.get(g) is not None)
+                    + int(reverification_by_g.get(g) is not None),
                     'tool_used': g in tool_output_by_g,
                     'tool_success': bool(tool_success_by_g.get(g, False)),
+                    'tool_call_count': int(tool_call_count_by_g.get(g, 0)),
+                    'successful_tool_call_count': int(successful_tool_call_count_by_g.get(g, 0)),
+                    'repair_triggered': g in repair_candidates,
                     'was_repaired': bool(repaired_by_g.get(g, False)),
+                    'repair_success': bool(repair_success_by_g.get(g, False)),
+                    'repair_score_improved': bool(repair_score_improved_by_g.get(g, False)),
                     'step_end_pos': current_positions[g],
                 })
 
             # Remove completed samples
+            completed_now = sum(final_answers[g] is not None for g in active_samples)
             active_samples = [g for g in active_samples if final_answers[g] is None]
+            self._progress_log(
+                f"step_done step={step_idx + 1} processed={step_active_count} "
+                f"completed={completed_now} tools={len(tool_output_by_g)} "
+                f"verified={len(verification_by_g)} repaired={sum(repaired_by_g.values())} "
+                f"active_remaining={len(active_samples)} "
+                f"elapsed={time.monotonic() - rollout_started_at:.1f}s"
+            )
 
         # === Finalize outputs ===
         # Keep the output shape identical across DP workers. Local samples
@@ -704,6 +942,37 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
         for i in range(batch_size):
             final_answers_array[i] = final_answers[i]
 
+        if self.verbose_logging and self.log_sample_count:
+            # GRPO samples are repeated contiguously per prompt. Log a bounded
+            # number of actual trajectories so sampled format drift is visible.
+            for sample_idx in range(min(batch_size, self.log_sample_count)):
+                prompt_slot = sample_idx // n_repeat
+                response_length = current_positions[sample_idx]
+                response_text = self.tokenizer.decode(
+                    combined_response[sample_idx, :response_length].tolist(),
+                    skip_special_tokens=True,
+                )
+                response_text = ' '.join(response_text.split())
+                if len(response_text) > self.log_sample_max_chars:
+                    response_text = truncate_content(response_text, self.log_sample_max_chars)
+                dataset_index = non_tensor_batch.get('index')
+                if dataset_index is not None:
+                    dataset_index = dataset_index[sample_idx]
+                    if torch.is_tensor(dataset_index):
+                        dataset_index = dataset_index.item()
+                    elif isinstance(dataset_index, np.generic):
+                        dataset_index = dataset_index.item()
+                sample_summary = {
+                    'prompt_slot': prompt_slot,
+                    'dataset_index': dataset_index,
+                    'trajectory': sample_idx % n_repeat + 1,
+                    'trajectories_per_prompt': n_repeat,
+                    'parsed_answer': final_answers[sample_idx],
+                    'steps': num_steps[sample_idx],
+                    'text': response_text,
+                }
+                self._progress_log('sample ' + json.dumps(sample_summary, ensure_ascii=False))
+
         output_non_tensor = {
             'step_data': step_data_array,
             'verify_probs': verify_probs_array,
@@ -719,5 +988,11 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
                 continue
             if key not in output_non_tensor:
                 output_non_tensor[key] = value
+
+        self._progress_log(
+            f"finished expanded_batch={batch_size} completed={sum(answer is not None for answer in final_answers)} "
+            f"total_steps={sum(num_steps)} total_repairs={sum(num_repairs)} "
+            f"elapsed={time.monotonic() - rollout_started_at:.1f}s"
+        )
 
         return DataProto(batch=batch, non_tensor_batch=output_non_tensor)

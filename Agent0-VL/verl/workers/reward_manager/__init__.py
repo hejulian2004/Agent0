@@ -20,6 +20,7 @@ from .batch import BatchRewardManager
 from .dapo import DAPORewardManager
 from .standalone_genrm import StandaloneGenRMRewardManager
 from .agent0 import Agent0RewardManager
+from .external import ExternalCorrectnessRewardManager
 
 __all__ = [
     'NaiveRewardManager',
@@ -29,5 +30,6 @@ __all__ = [
     'BatchRewardManager',
     'DAPORewardManager',
     'StandaloneGenRMRewardManager',
-    'Agent0RewardManager'
+    'Agent0RewardManager',
+    'ExternalCorrectnessRewardManager',
 ]

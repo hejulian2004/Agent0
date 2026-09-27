@@ -1,7 +1,9 @@
 import ast
 
+from PIL import Image
+
 from tools.sft_builder import build
-from tools.sft_builder.merge_sft import audit_record
+from tools.sft_builder.merge_sft import _audit_repair_flow, audit_record
 from verl.utils.sandbox.executor import ImagePathTransformer
 
 
@@ -16,6 +18,26 @@ class QueueTeacher:
         return self.responses.pop(0)
 
 
+def _valid_stage2_row():
+    return {
+        "messages": [
+            {"role": "user", "content": "Compute 1 + 1."},
+            {"role": "assistant", "content": "```python\nprint(1 + 1)\n```"},
+            {"role": "user", "content": "[Code Execution Result]\nOutput: 2"},
+            {"role": "assistant", "content": "<answer>\\boxed{2}</answer>"},
+            {"role": "user", "content": "Now switch to the Verifier role. Verify the answer."},
+            {
+                "role": "assistant",
+                "content": (
+                    '{"step_index": 1, "score": 1, "confidence": 0.95, '
+                    '"critique": "correct", "tool_check": true}'
+                ),
+            },
+        ],
+        "images": [],
+    }
+
+
 def test_low_confidence_repair_stays_in_one_auditable_sft_row(monkeypatch):
     def fake_execute_python(code_blocks, sandbox_timeout=10.0, images=()):
         del sandbox_timeout, images
@@ -27,7 +49,6 @@ def test_low_confidence_repair_stays_in_one_auditable_sft_row(monkeypatch):
     monkeypatch.setattr(build, "execute_python", fake_execute_python)
     teacher = QueueTeacher([
         "```python\nprint(2)\n```",
-        "The result is <answer>\n\\boxed{2}\n</answer>",
         '{"step_index": 1, "score": 0.0, "confidence": 0.4, "critique": "uncertain", "tool_check": true}',
         '{"action": "PATCH", "target_step": 1, "patch_type": "code", "new_content": "print(2)", "justification": "recheck the calculation"}',
         "```python\nprint(2)\n```",
@@ -55,6 +76,8 @@ def test_low_confidence_repair_stays_in_one_auditable_sft_row(monkeypatch):
     assert stats.quality_failures == 0
     assert len(records) == 1
     row = records[0]
+    assert any('"confidence": 0.4' in message["content"] for message in row["messages"])
+    assert any('"confidence": 0.95' in message["content"] for message in row["messages"])
     assert audit_record(row, stage=2) is None
     assert any(
         message["role"] == "user"
@@ -63,7 +86,7 @@ def test_low_confidence_repair_stays_in_one_auditable_sft_row(monkeypatch):
     )
     assert any(
         message["role"] == "user"
-        and "Apply the repair instruction" in message["content"]
+        and "A repair instruction has been issued for the previous step:" in message["content"]
         for message in row["messages"]
     )
     assert sum(
@@ -81,3 +104,46 @@ def test_sandbox_rewrites_quoted_image_path_argument():
 
     assert transformer.path_was_replaced is True
     assert 'Image.open(image_path)' in ast.unparse(transformed)
+
+
+def test_audit_rejects_non_object_record():
+    assert audit_record(1, stage=2) == "top_level_schema"
+
+
+def test_audit_rejects_invalid_role_order():
+    row = _valid_stage2_row()
+    row["messages"].insert(1, {"role": "user", "content": "unexpected second user"})
+    assert audit_record(row, stage=2) == "message_role_order"
+
+
+def test_audit_rejects_stage2_images():
+    row = _valid_stage2_row()
+    row["messages"][0]["content"] = "<image>" + row["messages"][0]["content"]
+    row["images"] = ["/definitely/missing.png"]
+    assert audit_record(row, stage=2) == "stage2_unexpected_image"
+
+
+def test_audit_allows_valid_stage2_images_when_requested(tmp_path):
+    image_path = tmp_path / "stage2.png"
+    Image.new("RGB", (1, 1), color="white").save(image_path)
+    row = _valid_stage2_row()
+    row["messages"][0]["content"] = "<image>" + row["messages"][0]["content"]
+    row["images"] = [str(image_path)]
+    assert audit_record(row, stage=2, allow_stage2_images=True) is None
+
+
+def test_repair_audit_requires_post_repair_verifier_response():
+    messages = [
+        {"role": "user", "content": "Now switch to the Self-Repair role."},
+        {
+            "role": "assistant",
+            "content": (
+                '{"action": "PATCH", "target_step": 1, "patch_type": "code", '
+                '"new_content": "print(2)", "justification": "fix"}'
+            ),
+        },
+        {"role": "user", "content": "A repair instruction has been issued for the previous step:"},
+        {"role": "assistant", "content": "```python\nprint(2)\n```"},
+        {"role": "user", "content": "Now switch to the Verifier role."},
+    ]
+    assert _audit_repair_flow(messages) == "missing_post_repair_verifier_response"

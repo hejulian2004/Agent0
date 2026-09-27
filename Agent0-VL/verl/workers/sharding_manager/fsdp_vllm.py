@@ -35,13 +35,26 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv('VERL_PPO_LOGGING_LEVEL', 'WARN'))
 
 
+def _get_vllm_tp_device_group():
+    """Return the tensor-parallel torch process group across vLLM APIs."""
+    # vLLM <=0.6 returned the GroupCoordinator from this legacy accessor.
+    legacy_getter = getattr(vllm_ps, 'get_tensor_model_parallel_group', None)
+    if legacy_getter is not None:
+        group = legacy_getter()
+        return getattr(group, 'device_group', group)
+
+    # vLLM >=0.7 renamed the accessor to get_tp_group().
+    return vllm_ps.get_tp_group().device_group
+
+
 def _normalize_vllm_weight_name(name: str, model) -> str:
     """Normalize converted Transformers Qwen2.5-VL names for vLLM.
 
     Recent Transformers versions expose the converted model as
-    model.visual and model.language_model. vLLM 0.8.x consumes the
-    original Hugging Face layout (visual and model) and applies its
-    own mapper afterwards.
+    model.visual and model.language_model. Current vLLM releases consume
+    the corresponding visual/language_model layout through their own
+    ``WeightsMapper``; normalize the FSDP state before calling
+    ``model.load_weights`` so both checkpoint layouts remain supported.
     """
     # PEFT wraps the base model below ``base_model.model``. vLLM is
     # initialized from the unwrapped checkpoint, so remove that wrapper.
@@ -176,12 +189,16 @@ class FSDPVLLMShardingManager(BaseShardingManager):
                  model_config,
                  full_params: bool = False,
                  device_mesh: DeviceMesh = None,
-                 offload_actor: bool = False):
+                 offload_actor: bool = False,
+                 sleep_level: int = 1):
         self.module = module
         self.inference_engine = inference_engine
         self.model_config = model_config
         self.device_mesh = device_mesh
         self.offload_actor = offload_actor
+        if sleep_level not in (1, 2):
+            raise ValueError(f'Unsupported vLLM sleep level: {sleep_level}')
+        self.sleep_level = sleep_level
 
         # Full params
         self.full_params = full_params
@@ -290,7 +307,20 @@ class FSDPVLLMShardingManager(BaseShardingManager):
                     model, iter_vllm_weights())
             else:
                 loaded_params = model.load_weights(iter_vllm_weights())
-            logger.info(f"vLLM load weights, loaded_params: {len(loaded_params)}")
+            loaded_params = set(loaded_params)
+            expected_params = {name for name, _ in model.named_parameters()}
+            missing_params = sorted(expected_params - loaded_params)
+            if missing_params:
+                preview = ', '.join(missing_params[:20])
+                raise RuntimeError(
+                    'vLLM actor synchronization left model parameters '
+                    f'uninitialized: loaded={len(loaded_params)}, '
+                    f'expected={len(expected_params)}, missing={len(missing_params)}; '
+                    f'first missing parameters: {preview}'
+                )
+            logger.warning(
+                'vLLM actor synchronization complete: loaded_params=%d, expected_params=%d',
+                len(loaded_params), len(expected_params))
 
         log_gpu_memory_usage('After sync model weights in sharding manager', logger=logger)
 
@@ -308,13 +338,30 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             self.torch_random_states = torch.cuda.get_rng_state()
             torch.cuda.set_rng_state(self.gen_random_states)
 
+    def ensure_sleeping_for_actor(self):
+        """Release vLLM allocations before placing the training actor on GPU."""
+        if vllm_version in ('0.4.2', '0.5.4', '0.6.3'):
+            raise RuntimeError('Actor KV-cache release requires vLLM sleep-mode support')
+        torch.cuda.synchronize()
+        free_before, _ = torch.cuda.mem_get_info()
+        if not self._vllm_is_sleeping:
+            self.inference_engine.sleep(level=self.sleep_level)
+            self._vllm_is_sleeping = True
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        free_after, _ = torch.cuda.mem_get_info()
+        logger.warning(
+            'vLLM sleeping before actor: KV cache released; sleep_level=%d, '
+            'free_before_gb=%.3f, free_after_gb=%.3f',
+            self.sleep_level, free_before / 1024**3, free_after / 1024**3)
+
     def __exit__(self, exc_type, exc_value, traceback):
         log_gpu_memory_usage('Before vllm offload in sharding manager', logger=logger)
         # TODO(ZSL): check this
         if vllm_version in ('0.4.2', '0.5.4', '0.6.3'):
             self.inference_engine.offload_model_weights()
         else:
-            self.inference_engine.sleep(level=1)
+            self.inference_engine.sleep(level=self.sleep_level)
             self._vllm_is_sleeping = True
         log_gpu_memory_usage('After vllm offload in sharding manager', logger=logger)
 
@@ -338,10 +385,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             return data
 
         # TODO: Current impl doesn't consider FSDP with torch micro-dp
-        if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3'):
-            group = vllm_ps.get_tensor_model_parallel_group()
-        else:
-            group = vllm_ps.get_tensor_model_parallel_group().device_group
+        group = _get_vllm_tp_device_group()
 
         all_gather_data_proto(data=data, process_group=group)
         return data

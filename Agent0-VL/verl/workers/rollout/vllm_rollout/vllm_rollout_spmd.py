@@ -38,12 +38,30 @@ from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
 from verl.workers.rollout.base import BaseRollout
 from vllm.distributed import parallel_state as vllm_ps
 from vllm import LLM, SamplingParams
-from verl.third_party.vllm import vllm_version
+from verl.third_party.vllm import vllm_mm_cache_kwargs, vllm_version
 
 # TODO
 # 1. support pp in vllm
 # 2. passing tokenizer is not necessary? no encoding/decoding is happending here
 # 3. simplify init logics
+
+
+def get_model_max_position_embeddings(model_hf_config) -> int:
+    """Return the language-model context limit across Transformers config layouts.
+
+    Transformers 5 nests Qwen2.5-VL language settings under ``text_config``;
+    older model configs expose ``max_position_embeddings`` at the root.
+    """
+    max_position_embeddings = getattr(model_hf_config, "max_position_embeddings", None)
+    if max_position_embeddings is None:
+        text_config = getattr(model_hf_config, "text_config", None)
+        max_position_embeddings = getattr(text_config, "max_position_embeddings", None)
+    if max_position_embeddings is None:
+        raise AttributeError(
+            f"{type(model_hf_config).__name__} does not expose max_position_embeddings "
+            "at the root or under text_config"
+        )
+    return int(max_position_embeddings)
 
 
 # NOTE(sgm): add for verl. We can optimize it by making the dataloader yield List[int] without padding.
@@ -94,7 +112,8 @@ class vLLMRollout(BaseRollout):
             vllm_ps.initialize_parallel_state(tensor_model_parallel_size=tensor_parallel_size,
                                               num_tp_per_train_tp=num_tp_per_train_tp)
 
-        assert model_hf_config.max_position_embeddings >= config.prompt_length + config.response_length, \
+        model_max_position_embeddings = get_model_max_position_embeddings(model_hf_config)
+        assert model_max_position_embeddings >= config.prompt_length + config.response_length, \
             "model context length should be greater than total sequence length"
 
         max_model_len = self.config.max_model_len if self.config.max_model_len \
@@ -107,9 +126,20 @@ class vLLMRollout(BaseRollout):
 
         trust_remote_code = kwargs.get('trust_remote_code', False)
         load_format = 'dummy' if config.load_format.startswith('dummy') else config.load_format
+        # The actor may load a pre-quantized bitsandbytes checkpoint, while
+        # vLLM's dummy model receives dense weights from the FSDP actor later.
+        # This vLLM build does not support bitsandbytes as an engine method, so
+        # hide only that checkpoint metadata from its in-memory HF config.
+        hf_overrides = {}
+        quantization_config = getattr(model_hf_config, 'quantization_config', None)
+        if (load_format == 'dummy' and quantization_config is not None
+                and (quantization_config.get('quant_method') if isinstance(quantization_config, dict)
+                     else getattr(quantization_config, 'quant_method', None)) == 'bitsandbytes'):
+            hf_overrides['quantization_config'] = None
 
         self.inference_engine = LLM(
             model=model_path,
+            hf_overrides=hf_overrides,
             enable_sleep_mode=True,
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend="external_launcher",
@@ -118,7 +148,6 @@ class vLLMRollout(BaseRollout):
             gpu_memory_utilization=config.gpu_memory_utilization,
             cpu_offload_gb=float(config.get("cpu_offload_gb", 0)),
             disable_custom_all_reduce=True,
-            disable_mm_preprocessor_cache=True,
             skip_tokenizer_init=False,
             max_model_len=max_model_len,
             load_format=load_format,
@@ -128,10 +157,15 @@ class vLLMRollout(BaseRollout):
             enable_chunked_prefill=config.enable_chunked_prefill,
             enable_prefix_caching=True,
             trust_remote_code=trust_remote_code,
+            **vllm_mm_cache_kwargs(),
         )
 
-        # Offload vllm model to reduce peak memory usage
-        self.inference_engine.sleep(level=1)
+        # Dummy loading is followed by FSDP weight synchronization, so the
+        # previous vLLM weights need not be backed up in host RAM.
+        sleep_level = int(config.get('sleep_level', 1))
+        if sleep_level not in (1, 2):
+            raise ValueError(f'Unsupported vLLM sleep level: {sleep_level}')
+        self.inference_engine.sleep(level=sleep_level)
 
         kwargs = dict(
             n=1,

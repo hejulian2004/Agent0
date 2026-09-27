@@ -25,8 +25,8 @@ The public entry point mirrors the HTTP sandbox API used by SimpleTIR:
         (success_list, stdout_list, stderr_list)
 
 Environment variables:
-    SANDBOX_RUN_TIMEOUT   wall-clock seconds per snippet (default: 10)
-    SANDBOX_CPU_TIMEOUT   CPU seconds per snippet          (default: 10)
+    SANDBOX_RUN_TIMEOUT   wall-clock seconds per snippet (default: 60)
+    SANDBOX_CPU_TIMEOUT   CPU seconds per snippet          (default: 60)
     SANDBOX_MEM_LIMIT_MB  address-space limit in MB        (default: 1024)
 """
 
@@ -35,8 +35,8 @@ import os
 import sys
 from typing import List, Optional, Tuple
 
-_RUN_TIMEOUT = float(os.getenv("SANDBOX_RUN_TIMEOUT", "10"))
-_CPU_TIMEOUT = int(os.getenv("SANDBOX_CPU_TIMEOUT", "10"))
+_RUN_TIMEOUT = float(os.getenv("SANDBOX_RUN_TIMEOUT", "60"))
+_CPU_TIMEOUT = int(os.getenv("SANDBOX_CPU_TIMEOUT", "60"))
 _MEM_LIMIT_MB = int(os.getenv("SANDBOX_MEM_LIMIT_MB", "1024"))
 _MAX_OUTPUT_BYTES = 64 * 1024  # cap captured stdout/stderr per snippet
 
@@ -151,7 +151,7 @@ async def parallel_sandbox(
     success flags, stdout texts, and stderr texts.
 
     ``run_timeout`` overrides the per-snippet wall-clock limit; when ``None`` the
-    ``SANDBOX_RUN_TIMEOUT`` environment default (10s) is used.
+    ``SANDBOX_RUN_TIMEOUT`` environment default (60s) is used.
     """
     # Bound concurrency by CPU count to avoid fork storms on large batches.
     cpu_bound = max(2, (os.cpu_count() or 4))

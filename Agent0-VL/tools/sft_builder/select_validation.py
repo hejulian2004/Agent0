@@ -29,6 +29,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--count", required=True, type=int)
     parser.add_argument("--manifest", type=Path, default=None)
+    parser.add_argument(
+        "--allow-stage2-images",
+        action="store_true",
+        help="Allow and validate local/URL images in multimodal Stage-2 rows",
+    )
     return parser
 
 
@@ -45,7 +50,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     for row in _read_rows(args.input):
         input_rows += 1
-        reason = audit_record(row, args.stage)
+        reason = audit_record(
+            row,
+            args.stage,
+            allow_stage2_images=args.allow_stage2_images,
+        )
         if reason is not None:
             rejected[reason] = rejected.get(reason, 0) + 1
             continue

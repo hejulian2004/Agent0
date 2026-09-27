@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Wait for two genuinely idle GPUs, then launch the pending two-GPU LoRA SFT.
+# Wait for two genuinely idle GPUs, then launch the two-GPU QLoRA SFT.
 # The monitor is intentionally local: it sleeps between checks and never
 # invokes the assistant or a model API.
 
@@ -13,8 +13,8 @@ MIN_FREE_MIB="${MIN_FREE_MIB:-22000}"
 MAX_USED_MIB="${MAX_USED_MIB:-512}"
 MAX_UTIL="${MAX_UTIL:-5}"
 
-MODEL_PATH="${MODEL_PATH:-/mnt/d/Agent0/models/Qwen2.5-VL-7B-Instruct}"
-SFT_DATA="${SFT_DATA:-data/sft/large/stage1_500.jsonl}"
+MODEL_PATH="${MODEL_PATH:-$ROOT_DIR/checkpoints/base/Qwen2.5-VL-7B-Instruct}"
+SFT_DATA="${SFT_DATA:-data/sft/large/stage1_500_broad_local.jsonl}"
 OUTPUT_DIR="${OUTPUT_DIR:-checkpoints/paper_500/sft_stage1_lora_2gpu}"
 MAX_LENGTH="${MAX_LENGTH:-3840}"
 GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-64}"
@@ -44,41 +44,17 @@ while true; do
     mapfile -t candidates < <(idle_gpus || true)
     if (( ${#candidates[@]} >= 2 )); then
         selected="${candidates[0]},${candidates[1]}"
-        log "found idle GPUs: ${selected}; launching 2-GPU LoRA SFT"
+        log "found idle GPUs: ${selected}; launching 2-GPU QLoRA SFT"
 
-        export CUDA_VISIBLE_DEVICES="$selected"
-        export NPROC_PER_NODE=2
-        export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
-        export FPS_MAX_FRAMES="${FPS_MAX_FRAMES:-10}"
-        export MAX_PIXELS="${MAX_PIXELS:-3211264}"
-        export WANDB_MODE="${WANDB_MODE:-disabled}"
-
-        exec "$ROOT_DIR/.venv/bin/swift" sft \
-            --model "$MODEL_PATH" \
-            --dataset "$SFT_DATA" \
-            --tuner_type lora \
-            --lora_rank 8 \
-            --lora_alpha 32 \
-            --lora_dropout 0.05 \
-            --torch_dtype bfloat16 \
-            --system scripts/prompt.txt \
-            --num_train_epochs 3 \
-            --per_device_train_batch_size 1 \
-            --per_device_eval_batch_size 1 \
-            --learning_rate 1e-5 \
-            --freeze_vit true \
-            --gradient_checkpointing true \
-            --gradient_accumulation_steps "$GRAD_ACCUM_STEPS" \
-            --save_strategy epoch \
-            --max_length "$MAX_LENGTH" \
-            --save_total_limit 5 \
-            --logging_steps 5 \
-            --output_dir "$OUTPUT_DIR" \
-            --warmup_ratio 0.05 \
-            --dataloader_num_workers 4 \
-            --deepspeed zero3 \
-            --attn_impl flash_attn \
-            --report_to none
+        exec env \
+            CUDA_VISIBLE_DEVICES="$selected" \
+            NPROC_PER_NODE=2 \
+            MODEL="$MODEL_PATH" \
+            SFT_DATA="$SFT_DATA" \
+            OUTPUT_DIR="$OUTPUT_DIR" \
+            MAX_LENGTH="$MAX_LENGTH" \
+            GRAD_ACCUM_STEPS="$GRAD_ACCUM_STEPS" \
+            bash "$ROOT_DIR/scripts/sft_stage1.sh"
     fi
 
     if (( ${#candidates[@]} == 0 )); then

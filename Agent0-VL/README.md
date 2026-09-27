@@ -5,7 +5,7 @@
 [![Agent0-VL Paper](https://img.shields.io/badge/📄-Agent0--VL%20Paper-b31b1b)](https://arxiv.org/abs/2511.19900)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](../LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.6-orange.svg)](https://pytorch.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.13-orange.svg)](https://pytorch.org/)
 
 *A Self-Evolving Vision-Language Agent with Tool-Integrated Reasoning, Evaluation, and Self-Repair*
 
@@ -72,7 +72,10 @@ The rollout worker (`verl/workers/rollout/vllm_rollout/vllm_agent0_rollout_spmd.
 
 ### Installation
 
-Requirements: Linux, CUDA ≥ 12.4 (to match the torch 2.6 / cu124 build below), 8× A100/H100/H200 recommended for full training.
+Requirements: Linux, an NVIDIA driver compatible with the selected CUDA runtime,
+and 8× A100/H100/H200 recommended for full training. The validated RTX 4090
+profile uses the CUDA 13 runtime packages inside the virtualenv; it does not
+modify the host CUDA driver or toolkit.
 
 ```bash
 # Clone the repository
@@ -83,19 +86,24 @@ cd Agent0/Agent0-VL
 conda create -n agent0vl python=3.10 -y
 conda activate agent0vl
 
-# PyTorch (must match the vLLM build below — vLLM 0.8.2 requires torch 2.6.x)
-pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 
 # vLLM for RL rollout and evaluation (GPU machines)
-pip install vllm==0.8.2
+pip install vllm==0.29.0
 
-# flash-attn (needed for training; builds against the torch installed above)
+# flash-attn (use a wheel matching the installed torch/CUDA/Python ABI when one
+# is available; otherwise build it inside this virtualenv)
 pip install flash-attn --no-build-isolation
 
 # Optional: ms-swift for the vision-language SFT stage (paper pipeline)
 pip install ms-swift
 ```
+
+For the validated CUDA 13.0 + Python 3.10 RTX 4090 environment, the
+prebuilt FlashAttention wheel and CUDA compiler/runtime packages were installed
+inside `.venv`. The RL launcher defaults to PyTorch sampling when FlashInfer's
+optional JIT linker is unavailable; this is a runtime compatibility setting and
+does not change GRPO/SERC behavior.
 
 Verify the sandbox (works on CPU-only machines, no GPU required):
 
@@ -125,7 +133,7 @@ The paper's SFT uses ms-swift with images (stage 1: tool-usage data, stage 2: an
 # Stage 1: tool usage & image manipulation (lr 1e-5)
 MODEL=Qwen/Qwen2.5-VL-7B-Instruct SFT_DATA=<stage1_data> bash scripts/sft_stage1.sh
 
-# Stage 2: math-code annealing (lr 1e-6), starting from stage-1 output
+# Stage 2: math-code annealing (lr 1e-5), starting from stage-1 output
 MODEL=checkpoints/sft_stage1 SFT_DATA=<stage2_data> bash scripts/sft_stage2.sh
 ```
 
@@ -140,6 +148,18 @@ MODEL_PATH=checkpoints/sft_stage2 ITERATION=1 bash scripts/rl-agent0.sh
 # Iterations 2 and 3: initialize from the previous iteration's checkpoint
 MODEL_PATH=checkpoints/Agent0-VL/agent0_vl_serc_iter1/... ITERATION=2 bash scripts/rl-agent0.sh
 MODEL_PATH=checkpoints/Agent0-VL/agent0_vl_serc_iter2/... ITERATION=3 bash scripts/rl-agent0.sh
+
+For the two-RTX-4090 mixed-data pipeline, run
+`bash scripts/sft-agent0-2x4090-mixed.sh`. It exports the mixed SFT model at
+`checkpoints/sft_2x4090/latest_mixed_merged`, which is the default input to
+the RL launcher. The RL launcher runs the external-correctness warm-up and
+resumes SERC automatically:
+`bash scripts/rl-agent0-2x4090-optimized.sh`. The warm-up checkpoint and SERC
+checkpoints are kept in the same run directory. Use
+`SKIP_WARMUP=1 bash scripts/rl-agent0-2x4090-optimized.sh` to start SERC
+directly, or `PHASE=external_warmup` / `PHASE=serc` to run one phase only.
+Set `MODEL_PATH` explicitly to use another SFT model; resuming a run with a
+different model is rejected.
 ```
 
 Equivalent direct launch:
@@ -167,7 +187,7 @@ For publication-grade benchmark numbers, evaluate the trained checkpoint with [V
 
 | Parameter | Value | Where |
 |-----------|-------|-------|
-| SFT learning rate | 1e-5 (stage 1) / 1e-6 (stage 2) | `scripts/sft_stage*.sh` |
+| SFT learning rate | 1e-5 (both stages) | `scripts/sft_stage*.sh` |
 | SFT epochs / batch | 3 / 128 | idem |
 | RL learning rate | 5e-7 | `verl/trainer/config/agent0_trainer.yaml` |
 | RL batch size | 256, 1 epoch per iteration | idem |

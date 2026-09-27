@@ -117,13 +117,6 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         # record the previous global step
         self.previous_global_step = global_step
 
-        # remove previous local_path
-        if max_ckpt_to_keep and isinstance(max_ckpt_to_keep, int) and max_ckpt_to_keep > 0 and len(
-                self.previous_saved_paths) >= max_ckpt_to_keep:
-            keep_start = len(self.previous_saved_paths) - max_ckpt_to_keep + 1
-            self.remove_previous_save_local_path(self.previous_saved_paths[:keep_start])
-            self.previous_saved_paths = self.previous_saved_paths[keep_start:]
-
         local_path = self.local_mkdir(local_path)
         torch.distributed.barrier()
 
@@ -169,5 +162,13 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 self.processing_class.save_pretrained(hf_local_path)
 
         torch.distributed.barrier()
+
+        # Remove old actor checkpoints only after all new shards were saved.
+        if max_ckpt_to_keep and isinstance(max_ckpt_to_keep, int) and max_ckpt_to_keep > 0 and len(
+                self.previous_saved_paths) >= max_ckpt_to_keep:
+            keep_start = len(self.previous_saved_paths) - max_ckpt_to_keep + 1
+            self.remove_previous_save_local_path(self.previous_saved_paths[:keep_start])
+            self.previous_saved_paths = self.previous_saved_paths[keep_start:]
+
 
         self.previous_saved_paths.append(local_path)

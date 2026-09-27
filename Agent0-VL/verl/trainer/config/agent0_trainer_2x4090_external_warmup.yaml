@@ -1,0 +1,21 @@
+# Paper warm-up phase: two epochs of conventional external correctness RL.
+# Hardware limits match the validated 2x RTX 4090 profile.
+defaults:
+  - agent0_trainer_2x4090
+  - _self_
+
+reward_model:
+  reward_manager: external
+  beta_div: 0.0
+  alpha_out: 1.0
+
+actor_rollout_ref:
+  rollout:
+    enable_verification: false
+    enable_self_repair: false
+
+trainer:
+  total_epochs: 2
+  total_training_steps: null
+  resume_mode: disable
+  val_before_train: false
