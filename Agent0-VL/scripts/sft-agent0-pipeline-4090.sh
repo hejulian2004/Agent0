@@ -6,20 +6,22 @@ cd "$ROOT_DIR"
 usage() {
     cat <<'HELP'
 Usage: bash scripts/sft-agent0-pipeline-4090.sh [options]
-  --gpus 0,1,2,3 --pp 4 --tp 1
-  --batch-size 128           Global batch (not per GPU)
+  --gpus 0,1,2,3 --pp 1 --tp 4
+  --batch-size 1             Global batch across data-parallel replicas
   --micro-batch-size 1 --epochs 3 --max-length 65536
   --model PATH --data PATH --output-dir PATH --workers 1
   --allow-bf16-lora          Explicitly select BF16 LoRA, not NF4 QLoRA
   --preflight-only           Check environment/data without training
   --dry-run                 Print command; no dependency imports or run creation
-This is a separate Megatron backend. Existing Swift/ZeRO3 checkpoints and
+This is BF16 LoRA (not QLoRA), TP=4 with sequence parallel. Existing Swift/ZeRO3 checkpoints and
 activation-offload plugins cannot be resumed here. Saves every 10 steps,
-retaining latest checkpoint; no automatic HF merge or latest-model update.
+retaining the latest two checkpoints (Megatron requires a limit of at least 2);
+uses Megatron's automatic Flash/cuDNN/unfused attention fallback; no automatic HF merge or
+latest-model update.
 HELP
 }
 GPU_LIST="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
-PP=4 TP=1 BATCH=128 MICRO=1 EPOCHS=3 LENGTH=65536 WORKERS=1
+PP=1 TP=4 BATCH=1 MICRO=1 EPOCHS=3 LENGTH=65536 WORKERS=1
 MODEL="$ROOT_DIR/checkpoints/base/Qwen2.5-VL-7B-Instruct"
 DATA="$ROOT_DIR/data/sft/large/mixed_balanced_1000.jsonl"
 OUTPUT="" ALLOW=0 PREFLIGHT=0 DRY=0
@@ -51,7 +53,7 @@ for name in PP TP BATCH MICRO EPOCHS LENGTH; do
     [[ "${!name}" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid $name" >&2; exit 2; }
 done
 [[ "$WORKERS" =~ ^[0-9]+$ ]] || { echo 'Invalid workers' >&2; exit 2; }
-(( PP > 1 && NPROC % (PP * TP) == 0 )) || { echo 'GPU count must be divisible by PP*TP; PP must exceed 1' >&2; exit 2; }
+(( NPROC % (PP * TP) == 0 )) || { echo 'GPU count must be divisible by PP*TP' >&2; exit 2; }
 DP=$((NPROC / PP / TP))
 (( BATCH % (MICRO * DP) == 0 )) || { echo 'Global batch must divide micro-batch*DP' >&2; exit 2; }
 PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv-pipeline/bin/python}"
@@ -63,6 +65,10 @@ if [[ -x "$CUDA_TOOLKIT/bin/nvcc" ]]; then
     export CUDA_HOME="${CUDA_HOME:-$CUDA_TOOLKIT}"
     export PATH="$CUDA_HOME/bin:$PATH"
 fi
+if [[ -d "$ROOT_DIR/.venv/lib/python3.10/site-packages/nvidia/cudnn" ]]; then
+    export CUDNN_HOME="${CUDNN_HOME:-$ROOT_DIR/.venv/lib/python3.10/site-packages/nvidia/cudnn}"
+    export LD_LIBRARY_PATH="$CUDNN_HOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
 export MAX_PIXELS="${MAX_PIXELS:-3211264}" OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export AGENT0_DATA_MEMORY_GUARD=1 AGENT0_DATA_MEMORY_PERCENT=90 AGENT0_DATA_MEMORY_WAIT_SECONDS=180
@@ -70,13 +76,14 @@ export PYTHONPATH="$ROOT_DIR/tools/runtime_guard:$ROOT_DIR${PYTHONPATH:+:$PYTHON
 CMD=("$MEGATRON_BIN" sft --model "$MODEL" --dataset "$DATA" --system "$ROOT_DIR/scripts/prompt.txt"
     --tuner_type lora --lora_rank 16 --lora_alpha 64 --target_modules all-linear
     --torch_dtype bfloat16 --freeze_vit true --freeze_aligner true
-    --pipeline_model_parallel_size "$PP" --tensor_model_parallel_size "$TP"
+    --pipeline_model_parallel_size "$PP" --tensor_model_parallel_size "$TP" --sequence_parallel true
+    --attention_backend auto
     --micro_batch_size "$MICRO" --global_batch_size "$BATCH" --num_train_epochs "$EPOCHS"
-    --max_length "$LENGTH" --truncation_strategy delete --strict true --packing false --split_dataset_ratio 0
+    --max_length "$LENGTH" --truncation_strategy left --strict true --packing false --split_dataset_ratio 0
     --lr 1e-5 --lr_warmup_fraction 0.05
     --recompute_granularity full --recompute_method uniform --recompute_num_layers 1
     --cross_entropy_loss_fusion true --vit_gradient_checkpointing true
-    --save_strategy steps --save_steps 10 --save_total_limit 1 --no_save_optim false --no_save_rng false
+    --save_strategy steps --save_steps 10 --save_total_limit 2 --no_save_optim false --no_save_rng false
     --async_save false --output_dir "$OUTPUT/adapter" --logging_steps 1
     --dataloader_num_workers "$WORKERS" --dataloader_prefetch_factor 1 --dataloader_pin_memory false
     --dataset_num_proc 1)
@@ -86,7 +93,7 @@ if (( DRY )); then printf '%q ' "${CMD[@]}"; printf '\n'; exit 0; fi
 [[ -x "$PYTHON_BIN" && -x "$MEGATRON_BIN" && -f "$DATA" && -f "$MODEL/config.json" ]] || { echo 'Missing Python/megatron/model/data' >&2; exit 1; }
 "$PYTHON_BIN" - <<'PY'
 import importlib, json, os
-for module in ('megatron.core', 'mcore_bridge', 'transformer_engine'):
+for module in ('megatron.core', 'mcore_bridge', 'transformer_engine.pytorch'):
     try:
         importlib.import_module(module)
     except Exception as error:
@@ -120,12 +127,14 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+"$PYTHON_BIN" tools/runtime_guard/normalize_te_flashattn_version.py
 {
     printf '# Experimental pipeline SFT\n\n- Status: running\n- Created: %s\n' "$(date -Iseconds)"
     printf -- '- Model: %s\n- Dataset: %s\n- GPUs: %s; PP=%s TP=%s DP=%s\n' "$MODEL" "$DATA" "$GPU_LIST" "$PP" "$TP" "$DP"
     printf -- '- Precision: BF16 base and LoRA; no NF4 quantization; rank16/alpha64/all-linear, frozen vision/aligner\n'
+    printf -- '- Attention: auto backend; TE compares FlashAttention public version after stripping only the local CUDA/Torch build suffix\n'
     printf -- '- Limits: context=%s global_batch=%s micro_batch=%s epochs=%s workers=%s\n' "$LENGTH" "$BATCH" "$MICRO" "$EPOCHS" "$WORKERS"
-    printf -- '- Checkpoints: every10 steps, latest only, optimizer/RNG retained; Megatron format\n- Log: training.log\n- Command: '
+    printf -- '- Checkpoints: every10 steps, latest two retained, optimizer/RNG retained; Megatron format\n- Log: training.log\n- Command: '
     printf '%q ' "${CMD[@]}"; printf '\n'
 } > "$OUTPUT/README.md"
 setsid "${CMD[@]}" > >(tee -a "$OUTPUT/training.log") 2>&1 &
