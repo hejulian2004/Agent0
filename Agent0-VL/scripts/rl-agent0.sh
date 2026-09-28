@@ -56,9 +56,9 @@ exec python3 -m verl.trainer.main_ppo \
     data.train_files=$train_data \
     data.val_files=$val_data \
     actor_rollout_ref.model.path=$MODEL_PATH \
-    actor_rollout_ref.actor.use_qlora=True \
-    actor_rollout_ref.actor.lora_rank=8 \
-    actor_rollout_ref.actor.lora_alpha=32 \
+    actor_rollout_ref.actor.use_qlora=${RL_USE_QLORA:-False} \
+    actor_rollout_ref.actor.lora_rank=${RL_LORA_RANK:-16} \
+    actor_rollout_ref.actor.lora_alpha=${RL_LORA_ALPHA:-64} \
     actor_rollout_ref.actor.qlora_4bit_quant_type=nf4 \
     actor_rollout_ref.actor.qlora_4bit_compute_dtype=bf16 \
     actor_rollout_ref.actor.qlora_4bit_quant_storage=bf16 \

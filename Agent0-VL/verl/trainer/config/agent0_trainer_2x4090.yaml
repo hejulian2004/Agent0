@@ -23,6 +23,8 @@ actor_rollout_ref:
     use_dynamic_bsz: True
     ppo_max_token_len_per_gpu: 9216
     fsdp_config:
+      # Load the completed BF16 SFT export without an FP32 actor copy.
+      model_dtype: bf16
       param_offload: True
       optimizer_offload: True
       backward_prefetch: backward_post

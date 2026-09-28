@@ -355,6 +355,12 @@ class RayPPOTrainer(object):
         n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
 
         # 1. Check total batch size for data correctness
+        # The prompt batch is dispatched to rollout workers before n-fold
+        # sampling, so divisibility of the expanded batch alone is insufficient.
+        assert config.data.train_batch_size % n_gpus == 0, (
+            f"train_batch_size ({config.data.train_batch_size}) must be divisible by "
+            f"total n_gpus ({n_gpus}) before rollout generation."
+        )
         real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.n
         assert real_train_batch_size % n_gpus == 0, \
             f"real_train_batch_size ({real_train_batch_size}) must be divisible by total n_gpus ({n_gpus})."

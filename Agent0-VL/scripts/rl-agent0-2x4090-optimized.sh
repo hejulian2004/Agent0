@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Configurable RTX 4090 RL pipeline (default: two GPUs).
+# Configurable RTX 4090 RL pipeline. BF16 LoRA actor is sharded by FSDP;
+# vLLM rollout uses tensor parallelism. This is not Megatron pipeline parallelism.
 #
 # Default:
 #   external correctness warm-up (3 epochs)
@@ -24,8 +25,9 @@ cd "${PROJECT_ROOT}"
 usage() {
     cat <<'HELP'
 Usage: bash scripts/rl-agent0-2x4090-optimized.sh [options]
-  --gpus 2,3 --tp 2           GPU IDs and tensor parallelism (TP defaults to GPU count)
-  --batch-size 2              Global prompt batch (not per GPU)
+  --gpus 0,1,2,3 --tp 4       GPU IDs and vLLM tensor parallelism (TP defaults to GPU count)
+  --lora-rank 16 --lora-alpha 64  BF16 LoRA actor; frozen base weights
+  --batch-size N              Global prompt batch (defaults to GPU count)
   --concurrency 16            vLLM max_num_seqs scheduling cap
   --rollout-n 8               Trajectories per prompt
   --mini-batch-size 1 --micro-batch-size 1
@@ -56,6 +58,8 @@ while (($#)); do
         --concurrency|--max-num-seqs) variable=MAX_NUM_SEQS ;;
         --rollout-n) variable=ROLLOUT_N ;;
         --tp) variable=TENSOR_MODEL_PARALLEL_SIZE ;;
+        --lora-rank) variable=RL_LORA_RANK ;;
+        --lora-alpha) variable=RL_LORA_ALPHA ;;
         --mini-batch-size) variable=PPO_MINI_BATCH_SIZE ;;
         --micro-batch-size) variable=PPO_MICRO_BATCH_SIZE_PER_GPU ;;
         --max-model-len) variable=MAX_MODEL_LEN ;;
@@ -92,15 +96,17 @@ DATALOADER_WORKERS="${DATALOADER_WORKERS:-1}"
 export AGENT0_DATA_MEMORY_GUARD=1
 export AGENT0_DATA_MEMORY_PERCENT="$DATA_MEMORY_PERCENT"
 export AGENT0_DATA_MEMORY_WAIT_SECONDS="$DATA_MEMORY_WAIT_SECONDS"
-CUDA_DEVICES="${CUDA_DEVICES:-${CUDA_VISIBLE_DEVICES:-2,3}}"
+CUDA_DEVICES="${CUDA_DEVICES:-${CUDA_VISIBLE_DEVICES:-0,1,2,3}}"
 IFS=',' read -r -a GPU_IDS <<< "$CUDA_DEVICES"
 NUM_GPUS=${#GPU_IDS[@]}
 FORMAL_TRAIN_DATA="${FORMAL_TRAIN_DATA:-${PROJECT_ROOT}/data/rl/rl_200_multisource.parquet}"
 WARMUP_TRAIN_DATA="${WARMUP_TRAIN_DATA:-${PROJECT_ROOT}/data/rl/rl_warmup_200_multisource.parquet}"
 VAL_DATA="${VAL_DATA:-${PROJECT_ROOT}/data/rl/validation_10_rebuilt.parquet}"
-MODEL_PATH="${MODEL_PATH:-${PROJECT_ROOT}/checkpoints/sft_2x4090/latest_mixed_merged}"
+MODEL_PATH="${MODEL_PATH:-${PROJECT_ROOT}/checkpoints/sft_pipeline/sft_pipeline_20260928_120620/adapter/v0-20260928-120644/checkpoint-3000-merged}"
+RL_LORA_RANK="${RL_LORA_RANK:-16}"
+RL_LORA_ALPHA="${RL_LORA_ALPHA:-64}"
 CKPT_ROOT="${CKPT_ROOT:-${PROJECT_ROOT}/checkpoints/paper_500}"
-TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-2}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-${NUM_GPUS}}"
 SAVE_FREQ="${SAVE_FREQ:-5}"
 TEST_FREQ="${TEST_FREQ:-0}"
 PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-1}"
@@ -123,10 +129,11 @@ for gpu_id in "${GPU_IDS[@]}"; do
     [[ -z "${seen_gpus[$gpu_id]:-}" ]] || { echo "Duplicate GPU ID: $gpu_id" >&2; exit 2; }
     seen_gpus[$gpu_id]=1
 done
-for variable in TRAIN_BATCH_SIZE SAVE_FREQ PPO_MINI_BATCH_SIZE PPO_MICRO_BATCH_SIZE_PER_GPU PPO_MAX_TOKEN_LEN_PER_GPU MAX_NUM_SEQS MAX_MODEL_LEN MAX_NUM_BATCHED_TOKENS MAX_PROMPT_LENGTH MAX_TOTAL_RESPONSE_LENGTH ROLLOUT_N TENSOR_MODEL_PARALLEL_SIZE PROGRESS_INTERVAL_SECONDS WARMUP_EPOCHS FORMAL_EPOCHS; do
+for variable in TRAIN_BATCH_SIZE SAVE_FREQ PPO_MINI_BATCH_SIZE PPO_MICRO_BATCH_SIZE_PER_GPU PPO_MAX_TOKEN_LEN_PER_GPU MAX_NUM_SEQS MAX_MODEL_LEN MAX_NUM_BATCHED_TOKENS MAX_PROMPT_LENGTH MAX_TOTAL_RESPONSE_LENGTH ROLLOUT_N TENSOR_MODEL_PARALLEL_SIZE PROGRESS_INTERVAL_SECONDS WARMUP_EPOCHS FORMAL_EPOCHS RL_LORA_RANK RL_LORA_ALPHA; do
     [[ "${!variable}" =~ ^[1-9][0-9]*$ ]] || { echo "$variable must be a positive integer" >&2; exit 2; }
 done
 (( NUM_GPUS % TENSOR_MODEL_PARALLEL_SIZE == 0 )) || { echo "GPU count must be divisible by TP" >&2; exit 2; }
+(( TRAIN_BATCH_SIZE % NUM_GPUS == 0 )) || { echo "Global prompt batch must be divisible by GPU count before rollout (batch=${TRAIN_BATCH_SIZE}, GPUs=${NUM_GPUS})" >&2; exit 2; }
 (( TRAIN_BATCH_SIZE * ROLLOUT_N % NUM_GPUS == 0 )) || { echo "batch-size * rollout-n must be divisible by GPU count" >&2; exit 2; }
 (( TRAIN_BATCH_SIZE >= PPO_MINI_BATCH_SIZE && PPO_MINI_BATCH_SIZE * ROLLOUT_N % NUM_GPUS == 0 && (PPO_MINI_BATCH_SIZE * ROLLOUT_N / NUM_GPUS) % PPO_MICRO_BATCH_SIZE_PER_GPU == 0 )) || { echo "Invalid actor mini/micro batch for GPU count and rollout-n" >&2; exit 2; }
 (( MAX_PROMPT_LENGTH + MAX_TOTAL_RESPONSE_LENGTH <= MAX_MODEL_LEN )) || { echo "Prompt + response length exceeds model context" >&2; exit 2; }
@@ -149,7 +156,7 @@ FORMAL_STEPS="${FORMAL_STEPS:-$((FORMAL_ROWS / TRAIN_BATCH_SIZE * FORMAL_EPOCHS)
 (( WARMUP_STEPS <= WARMUP_ROWS / TRAIN_BATCH_SIZE * WARMUP_EPOCHS && FORMAL_STEPS <= FORMAL_ROWS / TRAIN_BATCH_SIZE * FORMAL_EPOCHS )) || { echo "Step cap exceeds available epochs; increase --warmup-epochs/--epochs" >&2; exit 2; }
 if [[ "${DRY_RUN:-0}" == 1 ]]; then
     printf 'loading: workers=%s prefetch=%s memory_threshold=%s%% wait_timeout=%ss\n' "$DATALOADER_WORKERS" "$DATA_PREFETCH_FACTOR" "$DATA_MEMORY_PERCENT" "$DATA_MEMORY_WAIT_SECONDS"
-    printf 'GPUs=%s num_gpus=%s TP=%s global_batch=%s rollout_n=%s trajectories=%s concurrency=%s mini_batch=%s micro_batch=%s warmup_steps=%s formal_steps=%s max_model_len=%s model=%s\n' "$CUDA_DEVICES" "$NUM_GPUS" "$TENSOR_MODEL_PARALLEL_SIZE" "$TRAIN_BATCH_SIZE" "$ROLLOUT_N" "$((TRAIN_BATCH_SIZE * ROLLOUT_N))" "$MAX_NUM_SEQS" "$PPO_MINI_BATCH_SIZE" "$PPO_MICRO_BATCH_SIZE_PER_GPU" "$WARMUP_STEPS" "$FORMAL_STEPS" "$MAX_MODEL_LEN" "$MODEL_PATH"
+    printf 'GPUs=%s num_gpus=%s vllm_TP=%s actor=FSDP_BF16_LoRA rank=%s alpha=%s global_batch=%s rollout_n=%s trajectories=%s concurrency=%s mini_batch=%s micro_batch=%s warmup_steps=%s formal_steps=%s max_model_len=%s model=%s\n' "$CUDA_DEVICES" "$NUM_GPUS" "$TENSOR_MODEL_PARALLEL_SIZE" "$RL_LORA_RANK" "$RL_LORA_ALPHA" "$TRAIN_BATCH_SIZE" "$ROLLOUT_N" "$((TRAIN_BATCH_SIZE * ROLLOUT_N))" "$MAX_NUM_SEQS" "$PPO_MINI_BATCH_SIZE" "$PPO_MICRO_BATCH_SIZE_PER_GPU" "$WARMUP_STEPS" "$FORMAL_STEPS" "$MAX_MODEL_LEN" "$MODEL_PATH"
     exit 0
 fi
 MODEL_PATH="$(realpath -e -- "$MODEL_PATH")"
@@ -188,7 +195,7 @@ if [[ -n "${RESUME_RUN_DIR:-}" ]]; then
     readonly RUN_NAME="$(basename -- "${RUN_DIR}")"
     readonly WARMUP_RESUME_MODE="auto"
 else
-    readonly RUN_NAME="rl_${FORMAL_ROWS}_${NUM_GPUS}gpu_qlora_nf4_ctx${MAX_MODEL_LEN}_resp${MAX_TOTAL_RESPONSE_LENGTH}_n${ROLLOUT_N}_maxseq${MAX_NUM_SEQS}_gpuutil${GPU_MEMORY_UTILIZATION}_$(date +%Y%m%d_%H%M%S)"
+    readonly RUN_NAME="rl_${FORMAL_ROWS}_${NUM_GPUS}gpu_bf16_lora_r${RL_LORA_RANK}_ctx${MAX_MODEL_LEN}_resp${MAX_TOTAL_RESPONSE_LENGTH}_n${ROLLOUT_N}_maxseq${MAX_NUM_SEQS}_gpuutil${GPU_MEMORY_UTILIZATION}_$(date +%Y%m%d_%H%M%S)"
     readonly RUN_DIR="${CKPT_ROOT}/${RUN_NAME}"
     readonly WARMUP_RESUME_MODE="disable"
 fi
@@ -213,6 +220,7 @@ export CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}"
 export N_GPUS="${NUM_GPUS}"
 export VAL_DATA
 export MODEL_PATH
+export RL_USE_QLORA=False RL_LORA_RANK RL_LORA_ALPHA
 export CKPT_PATH="${CKPT_ROOT}"
 export PYTHONUNBUFFERED=1
 export AGENT0_ROLLOUT_VERBOSE=1
@@ -241,8 +249,8 @@ else
     "- Validation dataset: ${VAL_DATA}" \
     "- Warm-up: external correctness reward, ${WARMUP_EPOCHS} epochs, ${WARMUP_STEPS} steps" \
     "- Formal phase: SERC/GRPO, ${FORMAL_EPOCHS} epochs, ${FORMAL_STEPS} additional steps" \
-    "- GPUs: ${CUDA_DEVICES} (${NUM_GPUS} x RTX 4090, TP=${TENSOR_MODEL_PARALLEL_SIZE})" \
-    "- QLoRA: NF4, BF16 compute/storage, double quantization, LoRA rank 8/alpha 32" \
+    "- GPUs: ${CUDA_DEVICES} (${NUM_GPUS} x RTX 4090, actor FSDP=${NUM_GPUS}, vLLM TP=${TENSOR_MODEL_PARALLEL_SIZE})" \
+    "- LoRA: BF16 base, rank ${RL_LORA_RANK}/alpha ${RL_LORA_ALPHA}, frozen visual path; no NF4" \
     "- Memory: actor activation CPU offload, response-only logits, FSDP backward_post, actor/optimizer phase offload, vLLM sleep level 2" \
     "- Data loading: workers=$DATALOADER_WORKERS, prefetch=$DATA_PREFETCH_FACTOR, memory pause threshold=$DATA_MEMORY_PERCENT%, wait timeout=$DATA_MEMORY_WAIT_SECONDS seconds" \
     "- Batches: global=$TRAIN_BATCH_SIZE, actor mini=$PPO_MINI_BATCH_SIZE, per-GPU micro=$PPO_MICRO_BATCH_SIZE_PER_GPU" \
@@ -318,6 +326,8 @@ preflight() {
     require_file "${PROJECT_ROOT}/verl/trainer/config/agent0_trainer_2x4090_external_warmup.yaml"
     require_file "${PROJECT_ROOT}/scripts/rl-agent0.sh"
     require_file "${MODEL_PATH}/config.json"
+    require_file "${MODEL_PATH}/model.safetensors.index.json"
+    require_file "${MODEL_PATH}/tokenizer_config.json"
 
     if ! command -v setsid >/dev/null 2>&1; then
         echo "[rl-agent0] setsid is unavailable; refusing to start." >&2
@@ -329,7 +339,7 @@ preflight() {
     fi
 
     local gpu used
-    for gpu in 2 3; do
+    for gpu in "${GPU_IDS[@]}"; do
         used="$(nvidia-smi -i "${gpu}" --query-gpu=memory.used --format=csv,noheader,nounits | tr -d '[:space:]')"
         if [[ ! "${used}" =~ ^[0-9]+$ ]]; then
             echo "[rl-agent0] cannot read memory usage for GPU ${gpu}: ${used}" >&2

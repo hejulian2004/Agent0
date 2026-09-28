@@ -39,6 +39,7 @@ from verl.utils.model import compute_position_id_with_mask
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
+from verl.workers.sharding_manager import FSDPVLLMShardingManager
 import verl.utils.hdfs_io as hdfs_io
 
 from codetiming import Timer
@@ -470,10 +471,10 @@ class ActorRolloutRefWorker(Worker):
             actor_module,
             cpu_offload=cpu_offload,
             param_init_fn=init_fn,
-            # FSDP must preserve the original Params4bit views for QLoRA;
-            # flattening them loses the dense shape/quantization metadata that
-            # is needed when synchronizing the actor into vLLM.
-            use_orig_params=use_qlora,
+            # LoRA mixes frozen base weights and trainable adapter weights.
+            # Original parameters preserve those requires_grad flags; for
+            # QLoRA they also preserve Params4bit metadata for vLLM sync.
+            use_orig_params=lora_rank > 0,
             auto_wrap_policy=auto_wrap_policy,
             device_id=torch.cuda.current_device(),
             sharding_strategy=sharding_strategy,  # zero3
@@ -536,7 +537,6 @@ class ActorRolloutRefWorker(Worker):
 
         elif rollout_name == 'vllm':
             from verl.workers.rollout.vllm_rollout import vLLMRollout, vllm_mode
-            from verl.workers.sharding_manager import FSDPVLLMShardingManager
             log_gpu_memory_usage(f'Before building {rollout_name} rollout', logger=None)
             local_path = copy_to_local(self.config.model.path)
             if self.config.rollout.rollout_type == 'multiturn':
