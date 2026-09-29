@@ -95,4 +95,4 @@ htmlcov/
 # ---------------------
 # Local development copies
 # ---------------------
-Agent0-Vl-HJL/
+# Agent0-VL-HJL is tracked in git (except .venv/caches)

@@ -1,0 +1,31 @@
+# Agent0 parameter values are centralized in project-root config.yaml.
+# This file declares the additional Hydra keys; scripts.launch supplies values.
+defaults:
+  - ppo_trainer
+  - _self_
+
+data:
+  trust_remote_code: null
+
+actor_rollout_ref:
+  rollout:
+    repetition_penalty: null
+    max_reasoning_steps: null
+    max_total_response_length: null
+    max_obs_length: null
+    repair_threshold: null
+    max_repairs_per_trajectory: null
+    enable_tool_execution: null
+    enable_verification: null
+    enable_self_repair: null
+    sandbox_timeout: null
+
+reward_model:
+  lambda_tool: null
+  beta_div: null
+  alpha_out: null
+  gamma: null
+  tau_c: null
+  eta: null
+  kappa: null
+  max_steps: null

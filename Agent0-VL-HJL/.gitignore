@@ -1,0 +1,17 @@
+# Training data and checkpoints (never commit large artifacts)
+/data/
+/checkpoints/
+/outputs/
+/evaluation_results/
+wandb/
+
+# Python cache
+.venv
+.venv/
+.python/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# macOS
+.DS_Store
