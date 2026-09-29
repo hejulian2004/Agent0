@@ -30,11 +30,16 @@ import os
 
 def get_parallel_sandbox():
     """Return the ``parallel_sandbox`` coroutine for the configured backend."""
-    if os.getenv("SANDBOX_ENDPOINT", None) is not None:
+    backend = os.getenv("AGENT0_SANDBOX_BACKEND", "local_subprocess")
+    if backend == "remote":
+        if not os.getenv("SANDBOX_ENDPOINT"):
+            raise RuntimeError("remote sandbox backend requires SANDBOX_ENDPOINT")
         from sandbox.local_sandbox import parallel_sandbox
-    else:
+        return parallel_sandbox
+    if backend == "local_subprocess":
         from sandbox.subprocess_sandbox import parallel_sandbox
-    return parallel_sandbox
+        return parallel_sandbox
+    raise RuntimeError(f"unsupported AGENT0_SANDBOX_BACKEND: {backend}")
 
 
 __all__ = ["get_parallel_sandbox"]

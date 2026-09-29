@@ -6,6 +6,9 @@
 wandb/
 
 # Python cache
+.venv
+.venv/
+.python/
 __pycache__/
 *.py[cod]
 .pytest_cache/

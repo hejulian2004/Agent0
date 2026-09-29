@@ -36,6 +36,9 @@ from typing import Dict, List, Any, Union
 from collections import defaultdict
 import math
 
+from agent0_protocol.schema import CanonicalTrajectory
+from verl.prompts.agent0_templates import assistant_text
+
 
 class Agent0RewardManager:
     """Agent0-VL reward manager implementing SERC process rewards."""
@@ -118,6 +121,10 @@ class Agent0RewardManager:
             ground_truth = self._extract_ground_truth(data_item)
             data_source = str(data_item.non_tensor_batch.get('data_source', 'unknown'))
             step_data = list(data_item.non_tensor_batch.get('step_data', []) or [])
+            semantic_value = data_item.non_tensor_batch.get('canonical_trajectory')
+            if semantic_value is None:
+                raise ValueError('Agent0 reward requires a canonical trajectory')
+            semantic = CanonicalTrajectory.from_dict(semantic_value)
 
             # Fallback: derive step boundaries from the multiturn mask when the
             # rollout did not provide step_data (e.g. other rollout types).
@@ -163,22 +170,8 @@ class Agent0RewardManager:
                     metrics_tensors['tool_success'][i, step_idx] = r_tool
 
             # ---- Outcome reward r_out (Eq. 5) ----
-            # The rollout already extracts each trajectory's final answer
-            # (\boxed{} / FINAL_ANSWER) into non_tensor_batch['final_answers'].
-            # Score that directly: decoding the whole trainable span would end on
-            # the Verifier's JSON, whose confidence number gets mistaken for the
-            # prediction and collapses the outcome signal.
-            final_answer = data_item.non_tensor_batch.get('final_answers', None)
-            if final_answer is not None and str(final_answer).strip():
-                solution_str = "\\boxed{" + str(final_answer).strip() + "}"
-            else:
-                # Fallback: no explicit final answer emitted — decode the model's
-                # trainable tokens so a boxed answer inside the text is still scored.
-                if multiturn_mask is not None and multiturn_mask.any():
-                    decode_ids = response_ids[multiturn_mask.bool()]
-                else:
-                    decode_ids = response_ids
-                solution_str = self.tokenizer.decode(decode_ids, skip_special_tokens=True)
+            final_answer = assistant_text(semantic.items)
+            solution_str = "\\boxed{" + final_answer + "}" if final_answer else ""
 
             score_fn = self.compute_score or get_policy_score
             outcome_result = score_fn(solution_str=solution_str, ground_truth=ground_truth)

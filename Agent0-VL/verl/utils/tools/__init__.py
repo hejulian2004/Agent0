@@ -12,20 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tool execution utilities for Agent0-VL"""
+"""Tool registration and execution for Agent0-VL."""
 
-from .tool_registry import (
-    ToolRegistry,
-    ToolExecutor,
-    PythonExecTool,
-    get_global_tool_registry,
-    parse_tool_call
-)
+from agent0_protocol.tools import ToolRegistry, get_tool_registry
 
-__all__ = [
-    'ToolRegistry',
-    'ToolExecutor',
-    'PythonExecTool',
-    'get_global_tool_registry',
-    'parse_tool_call'
-]
+__all__ = ["ToolRegistry", "get_tool_registry"]

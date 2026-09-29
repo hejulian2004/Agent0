@@ -200,7 +200,7 @@ class ActorRolloutRefWorker(Worker):
             actor_module = actor_module_class.from_pretrained(pretrained_model_name_or_path=local_path,
                                                               torch_dtype=torch_dtype,
                                                               config=actor_model_config,
-                                                              attn_implementation='flash_attention_2',
+                                                              attn_implementation='sdpa',
                                                               trust_remote_code=trust_remote_code)
 
             if use_remove_padding or self.ulysses_sequence_parallel_size > 1:
@@ -735,7 +735,7 @@ class CriticWorker(Worker):
             critic_module = AutoModelForTokenClassification.from_pretrained(pretrained_model_name_or_path=local_path,
                                                                             torch_dtype=torch_dtype,
                                                                             config=critic_model_config,
-                                                                            attn_implementation='flash_attention_2',
+                                                                            attn_implementation='sdpa',
                                                                             trust_remote_code=trust_remote_code)
 
             use_remove_padding = config.model.get('use_remove_padding', False)
@@ -1002,7 +1002,7 @@ class RewardModelWorker(Worker):
             reward_module = AutoModelForTokenClassification.from_pretrained(pretrained_model_name_or_path=local_path,
                                                                             config=model_config,
                                                                             torch_dtype=torch.bfloat16,
-                                                                            attn_implementation='flash_attention_2',
+                                                                            attn_implementation='sdpa',
                                                                             trust_remote_code=trust_remote_code)
 
             if config.model.get('use_remove_padding', False) or self.ulysses_sequence_parallel_size > 1:
@@ -1037,7 +1037,7 @@ class RewardModelWorker(Worker):
         self.reward_module = self._build_model(config=self.config)
 
     def _forward_micro_batch(self, micro_batch):
-        from flash_attn.bert_padding import pad_input, unpad_input, index_first_axis, rearrange
+        from verl.utils.attention_padding import pad_input, unpad_input, index_first_axis, rearrange
         from verl.utils.ulysses import ulysses_pad_and_slice_inputs, gather_outpus_and_unpad
 
         with torch.no_grad(), torch.autocast(device_type='cuda', dtype=torch.bfloat16):

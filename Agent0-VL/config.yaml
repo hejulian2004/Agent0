@@ -1,0 +1,414 @@
+# 项目元信息。
+project:
+  name: Agent0-VL
+  root: .
+# Python 与多卡进程启动参数；runtime.python 指向本副本的虚拟环境。
+runtime:
+  python: .venv/bin/python
+  # SFT torchrun 的单机进程数；RL 的 GPU 数另见 rl.hydra.trainer.n_gpus_per_node。
+  nproc_per_node: 4
+  # 每个进程使用的 OpenMP 线程数。
+  omp_num_threads: 8
+# OpenAI Responses API 连接参数。API key 只从下方指定的环境变量读取。
+responses:
+  # Responses endpoint 的根地址，通常以 /v1 结尾。
+  base_url: https://api.openai.com/v1
+  # 目标模型名；正式调用前必须填写 endpoint 支持的模型。
+  model: null
+  # 保存 API key 的环境变量名，禁止把密钥写进本文件。
+  api_key_env: AGENT0_RESPONSES_API_KEY
+  # 单次 HTTP 请求超时，单位秒。
+  timeout_seconds: 180
+  # SDK 网络错误的最大重试次数。
+  max_retries: 3
+  # 单条 trajectory 最多允许的连续工具交互轮数。
+  max_tool_rounds: 8
+  # Responses API 单次生成的最大输出 token 数。
+  max_output_tokens: 2048
+
+# 工具代码执行沙箱设置。
+# local_subprocess 使用本机受限子进程：有 CPU、内存、运行时长和输出限制，
+# 但不隔离文件系统和网络；运行不可信代码时应配置 remote 隔离服务。
+sandbox:
+  # local_subprocess：本地资源受限执行；remote：调用 SandboxFusion 兼容服务。
+  backend: local_subprocess # local_subprocess | remote
+  # remote 服务地址从此环境变量读取，不把内部地址或凭据写入配置文件。
+  endpoint_env: AGENT0_SANDBOX_ENDPOINT
+  # 每段工具代码的墙钟超时，单位秒；同时传给 RL rollout。
+  run_timeout_seconds: 10
+  # 本地子进程 CPU 时间上限，单位秒；remote 服务由服务端自行配置。
+  cpu_timeout_seconds: 10
+  # 本地子进程地址空间上限，单位 MiB；remote 服务由服务端自行配置。
+  memory_limit_mb: 1024
+  # 捕获的 stdout/stderr 最大字节数，超过部分会截断。
+  max_output_bytes: 65536
+  # 本地同时运行的工具子进程上限。
+  max_concurrent_processes: 1
+  # 每段 Python 代码执行前自动导入的常用库；代码仍可自行 import。
+  # 可选项：math、numpy、pillow、opencv、sympy、rapidocr。依赖必须安装在 .venv 中。
+  # ultralytics 使用 PyTorch，工具 handler 在主 venv 中加载；不预载到受限代码进程，避免占用大量内存。
+  preload_packages:
+    - math
+    - numpy
+    - pillow
+    - opencv
+    - sympy
+    - rapidocr
+# 需要模型/语料的本地工具设置。
+tool_runtime:
+  detector:
+    # 默认 COCO 80 类 YOLO26n 权重，随副本存放，不改写用户目录或系统环境。
+    model_path: .venv/models/yolo26n.pt
+    # 置信度阈值；调高会减少低置信度框。
+    confidence: 0.25
+    # 单张图片最多返回的检测框数。
+    max_detections: 100
+    # cpu 避免工具推理占用训练 GPU；可按机器资源调整。
+    device: cpu
+  retrieval:
+    # 将待检索的 .txt/.md/.rst/.json/.jsonl/.csv 文档放入此目录。
+    corpus_dir: data/knowledge
+    # 最多返回多少条关键词匹配结果。
+    max_results: 5
+    # 每条命中文档最多返回的字符数。
+    snippet_chars: 800
+# Responses API 数据生成的采样与输出路径。
+data_generation:
+  repo_root: .
+  output: data/smoke/responses
+  samples_per_dataset: 10
+  max_attempts: 2
+  seed: 42
+# 从 canonical JSONL 导出 RL parquet 的输入输出及采样限制。
+data_export:
+  input: data/smoke/responses/sft_records.jsonl
+  output: data/smoke/responses/rl
+  samples_per_dataset: 10
+  allow_eval_only: false
+# 基准评估所用数据目录、输出目录和批大小。
+evaluation:
+  benchmarks: mathvista,mathverse,chartqa,arxivqa
+  data_dir: ./data
+  output_dir: ./evaluation_results
+  batch_size: 16
+# SFT 通用参数；stage1/stage2 中同名字段会覆盖这里的值。
+sft:
+  model_path: Qwen/Qwen2.5-VL-7B-Instruct
+  train_data: data/sft/train.parquet
+  val_data: null
+  output_dir: checkpoints/sft
+  experiment_name: sft-training
+  learning_rate: 1.0e-05
+  num_train_epochs: 3
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 16
+  max_length: 10240
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  gradient_checkpointing: true
+  dataloader_num_workers: 4
+  ulysses_sequence_parallel_size: 1
+  use_remove_padding: false
+  report_to_wandb: false
+  seed: 42
+  stage1:
+    # 第一阶段训练覆盖项。
+    learning_rate: 1.0e-05
+    num_train_epochs: 3
+    output_dir: checkpoints/sft_stage1
+  stage2:
+    # 第二阶段训练覆盖项；model_path 默认接第一阶段输出。
+    model_path: checkpoints/sft_stage1
+    learning_rate: 1.0e-06
+    num_train_epochs: 3
+    output_dir: checkpoints/sft_stage2
+# 完整 RL/PPO 配置，启动器会将全部字段作为 Hydra override 传给 VERL。
+# 字段语义参见 VERL 对应的 ppo_trainer 配置；下方保留展开值，方便统一调参。
+rl:
+  hydra:
+    # 数据读取、prompt 长度、batch size 和超长样本策略。
+    data:
+      tokenizer: null
+      train_files: data/agent0/train.parquet
+      val_files: data/agent0/val.parquet
+      prompt_key: prompt
+      reward_fn_key: data_source
+      max_prompt_length: 4096
+      max_response_length: 2048
+      train_batch_size: 256
+      val_batch_size: null
+      return_raw_input_ids: false
+      return_raw_chat: false
+      shuffle: true
+      filter_overlong_prompts: true
+      filter_overlong_prompts_workers: 4
+      truncation: error
+      image_key: images
+      trust_remote_code: true
+    actor_rollout_ref:
+      # 策略模型、actor 优化器，以及采样 rollout 参数。
+      hybrid_engine: true
+      model:
+        path: Qwen/Qwen2.5-VL-7B-Instruct
+        external_lib: null
+        override_config: {}
+        enable_gradient_checkpointing: true
+        use_remove_padding: true
+      actor:
+        # PPO/GRPO actor 的 micro/mini batch、裁剪、KL、熵和优化器设置。
+        strategy: fsdp
+        ppo_mini_batch_size: 128
+        ppo_micro_batch_size: null
+        ppo_micro_batch_size_per_gpu: null
+        use_dynamic_bsz: true
+        ppo_max_token_len_per_gpu: 32768
+        grad_clip: 1.0
+        clip_ratio: 0.2
+        clip_ratio_low: 0.2
+        clip_ratio_high: 0.28
+        clip_ratio_c: 3.0
+        loss_agg_mode: token-mean
+        entropy_coeff: 0.01
+        use_kl_loss: true
+        use_multiturn_loss: true
+        use_torch_compile: false
+        kl_loss_coef: 0.001
+        kl_loss_type: low_var_kl
+        ppo_epochs: 1
+        shuffle: false
+        ulysses_sequence_parallel_size: 1
+        checkpoint:
+          contents:
+          - model
+          - optimizer
+          - extra
+        optim:
+          lr: 5.0e-07
+          lr_warmup_steps: -1
+          lr_warmup_steps_ratio: 0.05
+          min_lr_ratio: null
+          warmup_style: constant
+          total_training_steps: -1
+          weight_decay: 0.01
+        fsdp_config:
+          wrap_policy:
+            min_num_params: 0
+          param_offload: false
+          optimizer_offload: false
+          fsdp_size: -1
+      ref:
+        # Reference policy 的 log-prob 批处理和 FSDP 参数。
+        fsdp_config:
+          param_offload: false
+          wrap_policy:
+            min_num_params: 0
+        log_prob_micro_batch_size: null
+        log_prob_micro_batch_size_per_gpu: null
+        log_prob_use_dynamic_bsz: true
+        log_prob_max_token_len_per_gpu: 32768
+        ulysses_sequence_parallel_size: 1
+      rollout:
+        # 本地 vLLM 采样参数；n 是每个 prompt 的采样数。
+        name: vllm
+        temperature: 1.0
+        top_k: -1
+        top_p: 1.0
+        use_fire_sampling: false
+        prompt_length: 4096
+        response_length: 2048
+        dtype: bfloat16
+        gpu_memory_utilization: 0.8
+        ignore_eos: false
+        enforce_eager: false
+        free_cache_engine: false
+        load_format: dummy_dtensor
+        tensor_model_parallel_size: 1
+        max_num_batched_tokens: 32768
+        max_model_len: null
+        max_num_seqs: 1024
+        log_prob_micro_batch_size: null
+        log_prob_micro_batch_size_per_gpu: null
+        log_prob_use_dynamic_bsz: true
+        log_prob_max_token_len_per_gpu: 32768
+        disable_log_stats: true
+        enable_chunked_prefill: true
+        do_sample: true
+        n: 8
+        rollout_type: agent0
+        num_turns: 8
+        is_golden_generation: false
+        is_only_genrm: false
+        end_with_verifer: false
+        val_kwargs:
+          top_k: -1
+          top_p: 0.95
+          temperature: 0.6
+          n: 4
+          do_sample: true
+          num_turns: 8
+        repetition_penalty: 1.05
+        max_reasoning_steps: 8
+        max_total_response_length: 16384
+        max_obs_length: 512
+        repair_threshold: 0.7
+        max_repairs_per_trajectory: 2
+        enable_tool_execution: true
+        enable_verification: true
+        enable_self_repair: true
+        # 每个工具调用的最长执行时间，单位秒；由 sandbox.run_timeout_seconds 同步覆盖。
+        sandbox_timeout: 10
+    critic:
+      # Critic 模型及其优化器/批处理设置。
+      rollout_n: 8
+      strategy: fsdp
+      optim:
+        lr: 2.0e-06
+        lr_warmup_steps_ratio: 0.0
+        min_lr_ratio: null
+        warmup_style: constant
+        total_training_steps: -1
+        weight_decay: 0.01
+      model:
+        path: Qwen/Qwen2.5-VL-7B-Instruct
+        tokenizer_path: Qwen/Qwen2.5-VL-7B-Instruct
+        override_config: {}
+        external_lib: null
+        enable_gradient_checkpointing: true
+        use_remove_padding: true
+        fsdp_config:
+          param_offload: false
+          optimizer_offload: false
+          wrap_policy:
+            min_num_params: 0
+          fsdp_size: -1
+      ppo_mini_batch_size: 128
+      ppo_micro_batch_size: null
+      ppo_micro_batch_size_per_gpu: null
+      forward_micro_batch_size: null
+      forward_micro_batch_size_per_gpu: null
+      use_dynamic_bsz: true
+      ppo_max_token_len_per_gpu: 32768
+      forward_max_token_len_per_gpu: 32768
+      ulysses_sequence_parallel_size: 1
+      ppo_epochs: 1
+      shuffle: false
+      grad_clip: 1.0
+      cliprange_value: 0.5
+      checkpoint:
+        contents:
+        - model
+        - optimizer
+        - extra
+    reward_model:
+      # Agent0 reward manager 和工具奖励权重；enable 控制独立 RM 模型是否启用。
+      enable: false
+      strategy: fsdp
+      model:
+        input_tokenizer: Qwen/Qwen2.5-VL-7B-Instruct
+        path: ~/models/FsfairX-LLaMA3-RM-v0.1
+        external_lib: null
+        use_remove_padding: false
+        fsdp_config:
+          wrap_policy:
+            min_num_params: 0
+          param_offload: false
+          fsdp_size: -1
+      micro_batch_size: null
+      micro_batch_size_per_gpu: null
+      max_length: null
+      ulysses_sequence_parallel_size: 1
+      use_dynamic_bsz: true
+      forward_max_token_len_per_gpu: 32768
+      reward_manager: agent0
+      num_turns: 8
+      is_golden_generation: false
+      is_only_genrm: false
+      end_with_verifer: false
+      policy_rs: false
+      rs_coef: 10.0
+      compute_score: null
+      lambda_tool: 0.3
+      beta_div: 0.0
+      alpha_out: 1.0
+      gamma: 0.99
+      tau_c: 0.7
+      eta: 0.05
+      kappa: 5.0
+      max_steps: 8
+    custom_reward_function:
+      path: null
+      name: compute_score
+    algorithm:
+      # Advantage 估计器、折扣系数和 KL penalty/控制器。
+      gamma: 1.0
+      lam: 0.95
+      adv_estimator: grpo
+      use_kl_in_reward: false
+      kl_penalty: kl
+      norm_type: whole
+      kl_ctrl:
+        type: fixed
+        kl_coef: 0.001
+        multiturn_kl: false
+        kl_coef_turn1: 0.1
+        kl_coef_turn2: 0.001
+        horizon: 10000
+        target_kl: 0.1
+    trainer:
+      # 训练轮数、GPU 数、日志、验证、checkpoint 和恢复设置。
+      balance_batch: false
+      total_epochs: 1
+      total_training_steps: null
+      project_name: Agent0-VL
+      experiment_name: agent0_serc
+      logger:
+      - console
+      - wandb
+      log_val_generations: 2
+      nnodes: 1
+      n_gpus_per_node: 4
+      save_freq: 50
+      resume_mode: auto
+      resume_from_path: null
+      val_before_train: true
+      val_only: false
+      test_freq: 50
+      critic_warmup: 0
+      default_hdfs_dir: null
+      del_local_ckpt_after_load: false
+      default_local_dir: checkpoints/Agent0-VL/agent0_serc
+      max_actor_ckpt_to_keep: null
+      max_critic_ckpt_to_keep: null
+      ray_wait_register_center_timeout: 300
+      save_validation_results: false
+      validation_results_path: validation_results.json
+# 评估明细文件和中间结果保存频率。
+evaluation_details:
+  save_per_sample_results: true
+  save_intermediate: true
+  intermediate_save_interval: 100
+
+# 可选 QLoRA smoke 训练。先填写五个必需路径；null 表示尚未配置。
+# 像素参数按 28x28 patch 数设置，其余字段是常见 LoRA/训练超参数。
+qlora_smoke:
+  model: null
+  sft_data: null
+  rl_data: null
+  output_dir: null
+  base_model_backup: null
+  epochs: 3
+  max_length: 1536
+  min_pixels: 3136
+  max_pixels: 200704
+  gradient_accumulation_steps: 4
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  lora_rank: 8
+  lora_alpha: 16
+  lora_dropout: 0.05
+  device: 0
+  seed: 42
+  save_every_steps: 10
+  max_train_records: 0
+  resume_from: null

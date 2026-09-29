@@ -94,21 +94,18 @@ async def parallel_sandbox(
 ) -> Tuple[List[bool], List[str], List[str]]:
     """Execute snippets concurrently against the HTTP sandbox service.
 
-    Falls back to the local subprocess sandbox when ``SANDBOX_ENDPOINT`` is
-    unset or aiohttp is unavailable, so callers never silently lose tool
-    execution.
+    Remote mode requires both ``SANDBOX_ENDPOINT`` and ``aiohttp``. Missing
+    remote configuration is reported as an error rather than switching to a
+    less isolated local backend.
 
     ``run_timeout`` overrides the per-snippet run limit; when ``None`` the
     ``SANDBOX_RUN_TIMEOUT`` environment default (10s) is used.
     """
     endpoint = os.getenv("SANDBOX_ENDPOINT", None)
-    if endpoint is None or not _AIOHTTP_AVAILABLE:
-        if endpoint is not None and not _AIOHTTP_AVAILABLE:
-            logging.warning("SANDBOX_ENDPOINT is set but aiohttp is not installed; falling back to local subprocess sandbox")
-        from sandbox.subprocess_sandbox import parallel_sandbox as local_parallel_sandbox
-
-        return await local_parallel_sandbox(tasks, stdin_list=stdin_list, num_processes=num_processes,
-                                            run_timeout=run_timeout)
+    if endpoint is None:
+        raise RuntimeError("remote sandbox mode requires SANDBOX_ENDPOINT")
+    if not _AIOHTTP_AVAILABLE:
+        raise RuntimeError("remote sandbox mode requires the aiohttp dependency")
 
     if run_timeout is None:
         run_timeout = float(os.getenv("SANDBOX_RUN_TIMEOUT", "10"))

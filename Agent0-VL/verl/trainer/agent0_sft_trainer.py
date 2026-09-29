@@ -12,18 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Agent0-VL SFT Trainer (text-trajectory variant)
-
-Supervised fine-tuning entry point built on verl's FSDPSFTTrainer. It trains
-on Agent0-VL reasoning trajectories (<think> tags + tool-call JSON + tool
-observations rendered as text).
-
-NOTE: this trainer optimizes the *language* loss only. For full
-vision-language SFT (images + text), use the ms-swift pipeline in
-``scripts/sft_stage1.sh`` / ``scripts/sft_stage2.sh``, which is the pipeline
-described in the paper (stage 1: tool usage, stage 2: math-code annealing).
-"""
+"""FSDP SFT trainer reading canonical Responses trajectories through the Qwen adapter."""
 
 import os
 import argparse
@@ -194,7 +183,7 @@ class Agent0SFTTrainer(FSDPSFTTrainer):
                 local_model_path,
                 config=hf_config,
                 torch_dtype=torch.float32,
-                attn_implementation='flash_attention_2',
+                attn_implementation='sdpa',
                 trust_remote_code=trust_remote_code)
 
             if self.use_remove_padding or self.config.ulysses_sequence_parallel_size > 1:

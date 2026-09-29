@@ -91,3 +91,8 @@ htmlcov/
 .tox/
 .mypy_cache/
 .pyre/
+
+# ---------------------
+# Local development copies
+# ---------------------
+Agent0-Vl-HJL/

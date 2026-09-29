@@ -31,6 +31,7 @@ Environment variables:
 """
 
 import asyncio
+import json
 import os
 import sys
 from typing import List, Optional, Tuple
@@ -38,7 +39,30 @@ from typing import List, Optional, Tuple
 _RUN_TIMEOUT = float(os.getenv("SANDBOX_RUN_TIMEOUT", "10"))
 _CPU_TIMEOUT = int(os.getenv("SANDBOX_CPU_TIMEOUT", "10"))
 _MEM_LIMIT_MB = int(os.getenv("SANDBOX_MEM_LIMIT_MB", "1024"))
-_MAX_OUTPUT_BYTES = 64 * 1024  # cap captured stdout/stderr per snippet
+_MAX_OUTPUT_BYTES = max(1024, int(os.getenv("SANDBOX_MAX_OUTPUT_BYTES", str(64 * 1024))))
+_MAX_CONCURRENT_PROCESSES = max(1, int(os.getenv("SANDBOX_MAX_CONCURRENT_PROCESSES", "1")))
+_IMPORT_STATEMENTS = {
+    "math": "import math",
+    "numpy": "import numpy as np",
+    "pillow": "from PIL import Image",
+    "opencv": "import cv2",
+    "sympy": "import sympy as sp",
+    "rapidocr": "from rapidocr import RapidOCR",
+}
+
+
+def _preload_code() -> str:
+    """Build trusted import statements from the configured package allowlist."""
+    try:
+        packages = json.loads(os.getenv("SANDBOX_PRELOAD_PACKAGES", '["math", "numpy", "pillow", "opencv", "sympy"]'))
+    except json.JSONDecodeError as exc:
+        raise ValueError("SANDBOX_PRELOAD_PACKAGES must be a JSON array") from exc
+    if not isinstance(packages, list) or any(not isinstance(name, str) for name in packages):
+        raise ValueError("SANDBOX_PRELOAD_PACKAGES must be a JSON array of package names")
+    unknown = sorted(set(packages) - _IMPORT_STATEMENTS.keys())
+    if unknown:
+        raise ValueError(f"unsupported sandbox preload package(s): {', '.join(unknown)}")
+    return chr(10).join(_IMPORT_STATEMENTS[name] for name in packages) + chr(10)
 
 
 def _make_preexec_fn():
@@ -47,17 +71,13 @@ def _make_preexec_fn():
         return None
 
     def _limit_resources():
-        try:
-            import resource
+        import resource
 
-            resource.setrlimit(resource.RLIMIT_CPU, (_CPU_TIMEOUT, _CPU_TIMEOUT + 1))
-            # RLIMIT_AS is unreliable on macOS; only enforce on Linux.
-            if sys.platform.startswith("linux"):
-                mem_bytes = _MEM_LIMIT_MB * 1024 * 1024
-                resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
-        except Exception:
-            # Never fail the exec because limits could not be applied.
-            pass
+        resource.setrlimit(resource.RLIMIT_CPU, (_CPU_TIMEOUT, _CPU_TIMEOUT + 1))
+        # RLIMIT_AS is unreliable on macOS; only enforce on Linux.
+        if sys.platform.startswith("linux"):
+            mem_bytes = _MEM_LIMIT_MB * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
         os.setsid()  # new process group so we can kill the whole tree
 
     return _limit_resources
@@ -89,7 +109,7 @@ async def single_sandbox(
             proc = await asyncio.create_subprocess_exec(
                 sys.executable,
                 "-c",
-                code,
+                _preload_code() + code,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -155,7 +175,8 @@ async def parallel_sandbox(
     """
     # Bound concurrency by CPU count to avoid fork storms on large batches.
     cpu_bound = max(2, (os.cpu_count() or 4))
-    semaphore = asyncio.Semaphore(max(1, min(num_processes, cpu_bound * 2)))
+    concurrency = min(num_processes, cpu_bound * 2, _MAX_CONCURRENT_PROCESSES)
+    semaphore = asyncio.Semaphore(max(1, concurrency))
 
     if stdin_list is None:
         coros = [single_sandbox(code, semaphore=semaphore, run_timeout=run_timeout) for code in tasks]

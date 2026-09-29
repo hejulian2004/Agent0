@@ -16,6 +16,7 @@ from omegaconf import ListConfig
 import os
 from typing import List, Union, Optional, Callable
 import copy
+import json
 import datasets
 from collections import defaultdict
 
@@ -26,6 +27,9 @@ from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from verl.utils.model import compute_position_id_with_mask
 import verl.utils.torch_functional as verl_F
+from agent0_protocol.adapters import QwenModelAdapter
+from agent0_protocol.schema import CanonicalTrajectory
+from agent0_protocol.tools import get_tool_registry
 
 
 def collate_fn(data_list: list[dict]) -> dict:
@@ -97,6 +101,7 @@ class RLHFDataset(Dataset):
         self.original_parquet_files = copy.deepcopy(parquet_files)  # use for resume
         self.cache_dir = os.path.expanduser(cache_dir)
         self.tokenizer = tokenizer
+        self.model_adapter = QwenModelAdapter(tokenizer)
         self.processor = processor
 
         self.prompt_key = prompt_key
@@ -139,8 +144,10 @@ class RLHFDataset(Dataset):
             tokenizer = self.tokenizer
             prompt_key = self.prompt_key
             self.dataframe = self.dataframe.filter(
-                lambda doc: len(tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True)
-                               ) <= self.max_prompt_length,
+                lambda doc: len(self.model_adapter.encode_context(
+                    CanonicalTrajectory.from_dict(json.loads(doc["canonical_trajectory_json"])).items,
+                    get_tool_registry().definitions(),
+                )) <= self.max_prompt_length,
                 num_proc=self.num_workers,
                 desc=f"Filtering prompts longer than {self.max_prompt_length} tokens")
 
@@ -164,9 +171,13 @@ class RLHFDataset(Dataset):
         """
         row_dict: dict = self.dataframe[item]
 
-        chat = row_dict.pop(self.prompt_key)
-        
-        prompt_with_chat_template = self.tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
+        if "canonical_trajectory_json" not in row_dict:
+            raise ValueError("RL row requires canonical_trajectory_json")
+        trajectory = CanonicalTrajectory.from_dict(json.loads(row_dict["canonical_trajectory_json"]))
+        if trajectory.tools != get_tool_registry().definitions():
+            raise ValueError("RL row tool definitions differ from the registry")
+        row_dict.pop(self.prompt_key, None)
+        prompt_with_chat_template = self.model_adapter.render(trajectory.items, trajectory.tools, generate=True)
 
         is_multi_modal = self.image_key in row_dict
         if is_multi_modal:  # expand image token
@@ -220,7 +231,7 @@ class RLHFDataset(Dataset):
 
         # encode prompts without chat template
         if self.return_raw_chat:
-            row_dict['raw_prompt'] = chat
+            row_dict['raw_prompt'] = trajectory.items
 
         # add index for each prompt
         index = row_dict.get("extra_info", {}).get("index", 0)

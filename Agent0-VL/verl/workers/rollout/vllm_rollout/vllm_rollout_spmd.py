@@ -38,7 +38,6 @@ from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
 from verl.workers.rollout.base import BaseRollout
 from vllm.distributed import parallel_state as vllm_ps
 from vllm import LLM, SamplingParams
-from verl.third_party.vllm import vllm_version
 
 # TODO
 # 1. support pp in vllm
@@ -117,7 +116,7 @@ class vLLMRollout(BaseRollout):
             enforce_eager=config.enforce_eager,
             gpu_memory_utilization=config.gpu_memory_utilization,
             disable_custom_all_reduce=True,
-            disable_mm_preprocessor_cache=True,
+            mm_processor_cache_gb=0,
             skip_tokenizer_init=False,
             max_model_len=max_model_len,
             load_format=load_format,
@@ -137,9 +136,7 @@ class vLLMRollout(BaseRollout):
             max_tokens=config.response_length,
         )
 
-        # # we may detokenize the result all together later
-        if vllm_version != '0.3.1':
-            kwargs['detokenize'] = False
+        kwargs['detokenize'] = False
 
         # supporting adding any sampling params from the config file
         for k in config.keys():
@@ -169,9 +166,6 @@ class vLLMRollout(BaseRollout):
 
     @torch.no_grad()
     def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
-        # rebuild vllm cache engine
-        if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3') and self.config.free_cache_engine:
-            self.inference_engine.init_cache_engine()
 
         idx = prompts.batch['input_ids']  # (bs, prompt_length)
         # left-padded attention_mask
@@ -289,7 +283,5 @@ class vLLMRollout(BaseRollout):
             batch_size=batch_size)
 
         # free vllm cache engine
-        if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3') and self.config.free_cache_engine:
-            self.inference_engine.free_cache_engine()
 
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)

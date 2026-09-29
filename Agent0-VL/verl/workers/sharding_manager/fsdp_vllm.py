@@ -26,10 +26,8 @@ from verl import DataProto
 from verl.utils.torch_functional import (broadcast_dict_tensor, allgather_dict_tensors)
 from verl.protocol import all_gather_data_proto
 from verl.utils.debug import log_gpu_memory_usage
-from verl.third_party.vllm import vllm_version
 
 from .base import BaseShardingManager
-from .patch import patched_ds_v3_load_weights
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv('VERL_PPO_LOGGING_LEVEL', 'WARN'))
@@ -86,23 +84,16 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         log_gpu_memory_usage('Before state_dict() in sharding manager memory', logger=logger)
         params = self.module.state_dict()
         log_gpu_memory_usage('After state_dict() in sharding manager memory', logger=logger)
-        # Copy, not share memory
-        load_format = 'hf' if self.full_params else 'dtensor'
-
-        if vllm_version in ('0.4.2', '0.5.4', '0.6.3'):
-            self.inference_engine.sync_model_weights(params, load_format=load_format)
-        else:
-            self.inference_engine.wake_up()
-            world_size = torch.distributed.get_world_size()
-            model = self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
-            if model.config.architectures[0] in ['DeepseekV2ForCausalLM', 'DeepseekV3ForCausalLM']:
-                loaded_params = patched_ds_v3_load_weights(
-                    model, ((name, param.full_tensor() if world_size != 1 and hasattr(param, 'full_tensor') else param)
-                            for name, param in params.items()))
-            else:
-                loaded_params = model.load_weights(
-                    ((name, param.full_tensor() if world_size != 1 else param) for name, param in params.items()))
-            logger.info(f"vLLM load weights, loaded_params: {len(loaded_params)}")
+        self.inference_engine.wake_up()
+        world_size = torch.distributed.get_world_size()
+        weights = [
+            (name, param.full_tensor() if world_size != 1 and hasattr(param, 'full_tensor') else param)
+            for name, param in params.items()
+        ]
+        # vLLM 0.30 exposes worker reload through LLM.collective_rpc. This
+        # avoids the removed V0 driver_worker/model_runner object path.
+        self.inference_engine.collective_rpc('reload_weights', args=(weights,))
+        del weights
 
         log_gpu_memory_usage('After sync model weights in sharding manager', logger=logger)
 
@@ -123,10 +114,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
     def __exit__(self, exc_type, exc_value, traceback):
         log_gpu_memory_usage('Before vllm offload in sharding manager', logger=logger)
         # TODO(ZSL): check this
-        if vllm_version in ('0.4.2', '0.5.4', '0.6.3'):
-            self.inference_engine.offload_model_weights()
-        else:
-            self.inference_engine.sleep(level=1)
+        self.inference_engine.sleep(level=1)
         log_gpu_memory_usage('After vllm offload in sharding manager', logger=logger)
 
         # self.module.to('cuda')
@@ -149,10 +137,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             return data
 
         # TODO: Current impl doesn't consider FSDP with torch micro-dp
-        if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3'):
-            group = vllm_ps.get_tensor_model_parallel_group()
-        else:
-            group = vllm_ps.get_tensor_model_parallel_group().device_group
+        group = vllm_ps.get_tensor_model_parallel_group().device_group
 
         all_gather_data_proto(data=data, process_group=group)
         return data
