@@ -172,6 +172,7 @@ class HJLState:
     current_step: int = 0
     max_steps: int = 8
     consecutive_tool_failures: int = 0
+    discovery_attempts: int = 0
     stop_reason: StopReason | None = None
 
     final_prediction: dict[str, Any] | None = None
@@ -203,6 +204,7 @@ class HJLState:
             "current_step": self.current_step,
             "max_steps": self.max_steps,
             "consecutive_tool_failures": self.consecutive_tool_failures,
+            "discovery_attempts": self.discovery_attempts,
             "stop_reason": self.stop_reason.value if isinstance(self.stop_reason, Enum) else (str(self.stop_reason) if self.stop_reason else None),
             "final_prediction": copy.deepcopy(self.final_prediction),
             "step_history": copy.deepcopy(self.step_history),

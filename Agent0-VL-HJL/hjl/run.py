@@ -11,6 +11,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from .config import HJLConfig
 from .engine import HJLEngine
 from .trajectory import to_canonical_trajectory
 
@@ -30,31 +31,49 @@ def _create_mock_image() -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run HJL industrial visual anomaly detection.")
     parser.add_argument("--image", type=str, default=None, help="Path to input industrial image.")
-    parser.add_argument("--mode", type=str, choices=["direct", "react", "react_verifier", "hjl"], default="hjl", help="Execution mode.")
-    parser.add_argument("--instruction", type=str, default="Perform industrial visual anomaly inspection.", help="Instruction prompt.")
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["direct", "react", "react_verifier", "hjl"],
+        default="hjl",
+        help="Execution mode.",
+    )
+    parser.add_argument(
+        "--instruction",
+        type=str,
+        default="Perform industrial visual anomaly inspection.",
+        help="Instruction prompt.",
+    )
     parser.add_argument("--category", type=str, default="metal_casting", help="Product category.")
     parser.add_argument("--max-steps", type=int, default=8, help="Maximum allowable inspection steps.")
     parser.add_argument("--config", type=str, default="config.yaml", help="Configuration file path.")
-    parser.add_argument("--output-dir", type=str, default="outputs/hjl_trajectories", help="Directory to save trajectories.")
-    parser.add_argument("--mock", action="store_true", help="Generate a mock test image if none provided.")
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="outputs/hjl_trajectories",
+        help="Directory to save trajectories.",
+    )
+    parser.add_argument("--mock", action="store_true", help="Use mock model caller and generate test image if needed.")
 
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
     image_path = args.image
     if not image_path:
-        if args.mock or True:  # Default to mock if none provided
-            mock_file = _create_mock_image()
-            image_path = str(mock_file)
-            logging.info(f"Generated test image at: {image_path}")
-        else:
-            parser.error("--image is required unless --mock is specified.")
+        mock_file = _create_mock_image()
+        image_path = str(mock_file)
+        logging.info(f"Generated test image at: {image_path}")
 
-    out_dir = Path(args.output_dir)
+    # Load configuration
+    config = HJLConfig.from_yaml(args.config)
+    if args.max_steps:
+        config.max_steps = args.max_steps
+
+    out_dir = Path(args.output_dir or config.trajectory_output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     traj_file = out_dir / "hjl_trajectory.jsonl"
 
-    engine = HJLEngine()
+    engine = HJLEngine(config=config, mock=args.mock)
     logging.info(f"Running mode: {args.mode} on {image_path}")
 
     if args.mode == "direct":

@@ -59,18 +59,25 @@ def to_canonical_trajectory(state: HJLState) -> CanonicalTrajectory:
 
         # Map to canonical tool name if adapted
         canonical_name = tool_name
+        raw_args = copy.deepcopy(obs.get("arguments", {}))
+        call_args = raw_args
+
         if tool_name == "crop_region":
             canonical_name = "crop_image"
+            call_args = {"bbox": list(raw_args.get("bbox", [0, 0, 10, 10]))}
         elif tool_name == "zoom_region":
             canonical_name = "zoom_image"
+            call_args = {"scale": float(raw_args.get("scale", 2.0))}
         elif tool_name == "retrieve_normal_reference":
             canonical_name = "retrieve"
-
-        # Check if tool is registered
-        if not any(t["name"] == canonical_name for t in tools):
-            canonical_name = "visual_analyzer"
-
-        call_args = obs.get("arguments", {})
+            call_args = {"query": str(raw_args.get("query") or raw_args.get("category", "normal reference"))}
+        elif tool_name == "rotate_image":
+            canonical_name = "rotate_image"
+            call_args = {"angle": float(raw_args.get("angle", 90.0))}
+        else:
+            if not any(t["name"] == canonical_name for t in tools):
+                canonical_name = "visual_analyzer"
+                call_args = {}
         trajectory.append({
             "type": "function_call",
             "call_id": call_id,

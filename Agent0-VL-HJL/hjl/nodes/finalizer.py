@@ -13,8 +13,10 @@ from ..taxonomy import EvidenceConclusion, EvidenceStatus, GlobalStatus
 
 
 def finalizer_node(state: HJLState) -> dict[str, Any]:
-    """Formulate the final prediction structure from verified judgments."""
-    is_anomaly = False
+    """Formulate the final prediction structure from verified judgments or explicit budget termination."""
+    is_anomaly: bool | None = False
+    best_effort_is_anomaly: bool = False
+    best_effort: bool = False
     conclusion = "NORMAL"
     conf = 0.5
     stop_reason = state.stop_reason
@@ -38,11 +40,12 @@ def finalizer_node(state: HJLState) -> dict[str, Any]:
         conf = state.global_judgment.judgment_confidence
         stop_reason = StopReason.CONFIRMED_NORMAL
 
-    # 3. From budget / fallback termination
+    # 3. From budget / unverified termination (Physical separation of verified vs fallback)
     else:
-        # Best effort based on accumulated anomaly score
-        is_anomaly = state.evidence_state.anomaly_score >= 0.5
-        conclusion = "ANOMALY" if is_anomaly else "NORMAL"
+        conclusion = "UNRESOLVED"
+        is_anomaly = None
+        best_effort_is_anomaly = state.evidence_state.anomaly_score >= 0.5
+        best_effort = True
         conf = max(state.evidence_state.anomaly_score, 1.0 - state.evidence_state.anomaly_score)
         if stop_reason is None:
             stop_reason = StopReason.MAX_STEPS
@@ -57,12 +60,14 @@ def finalizer_node(state: HJLState) -> dict[str, Any]:
         "sample_id": state.sample_id,
         "is_anomaly": is_anomaly,
         "conclusion": conclusion,
+        "best_effort": best_effort,
+        "best_effort_is_anomaly": best_effort_is_anomaly,
         "anomaly_score": round(state.evidence_state.anomaly_score, 4),
         "confidence": round(conf, 4),
         "detected_regions": detected_regions,
         "inspected_regions": state.evidence_state.inspected_regions,
         "evidence_summary": [e.statement for e in state.evidence_state.evidence_items],
-        "stop_reason": stop_reason.value if stop_reason else StopReason.CONFIRMED_ANOMALY.value,
+        "stop_reason": stop_reason.value if stop_reason else StopReason.MAX_STEPS.value,
         "total_steps": state.current_step,
         "tool_cost": state.evidence_state.tool_cost,
     }

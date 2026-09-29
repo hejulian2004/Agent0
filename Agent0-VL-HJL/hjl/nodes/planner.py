@@ -22,16 +22,10 @@ def planner_node(state: HJLState) -> dict[str, Any]:
             allowed_actions = [ActionType.GLOBAL_SCAN, ActionType.RELOCALIZE]
 
         selected_action = allowed_actions[0]
-        if selected_action == ActionType.GLOBAL_SCAN:
-            tool_calls.append({
-                "name": "localize_candidate",
-                "arguments": {},
-            })
-        else:
-            tool_calls.append({
-                "name": "localize_candidate",
-                "arguments": {},
-            })
+        tool_calls.append({
+            "name": "localize_candidate",
+            "arguments": {},
+        })
 
         plan = {
             "phase": phase.value,
@@ -45,18 +39,23 @@ def planner_node(state: HJLState) -> dict[str, Any]:
         if not allowed_actions:
             allowed_actions = [ActionType.RETRIEVE_REFERENCE, ActionType.CROSS_VALIDATE]
 
-        selected_action = allowed_actions[0]
+        selected_action = state.selected_action or allowed_actions[0]
 
         if selected_action == ActionType.RETRIEVE_REFERENCE:
             category = state.category or "industrial_component"
             tool_calls.append({
                 "name": "retrieve_normal_reference",
-                "arguments": {"query": f"normal standard template for {category}"},
+                "arguments": {"category": category},
             })
         elif selected_action == ActionType.CROSS_VALIDATE:
+            ref_path = (
+                state.evidence_state.normal_references[-1]["reference_path"]
+                if state.evidence_state.normal_references
+                else None
+            )
             tool_calls.append({
                 "name": "compare_with_reference",
-                "arguments": {},
+                "arguments": {"reference_path": ref_path} if ref_path else {},
             })
         elif selected_action == ActionType.ENHANCE_REGION:
             tool_calls.append({
@@ -64,7 +63,11 @@ def planner_node(state: HJLState) -> dict[str, Any]:
                 "arguments": {"scale": 2.0},
             })
         elif selected_action == ActionType.INSPECT_NEXT_REGION:
-            next_bbox = state.evidence_state.unresolved_regions[0] if state.evidence_state.unresolved_regions else [0, 0, 10, 10]
+            next_bbox = (
+                state.evidence_state.unresolved_regions[0]
+                if state.evidence_state.unresolved_regions
+                else [0, 0, 10, 10]
+            )
             tool_calls.append({
                 "name": "crop_region",
                 "arguments": {"bbox": next_bbox},
@@ -112,6 +115,21 @@ def planner_node(state: HJLState) -> dict[str, Any]:
                     "name": "crop_region",
                     "arguments": {"bbox": target_bbox},
                 })
+        elif selected_action == ActionType.CROSS_VALIDATE:
+            ref_path = (
+                state.evidence_state.normal_references[-1]["reference_path"]
+                if state.evidence_state.normal_references
+                else None
+            )
+            tool_calls.append({
+                "name": "compare_with_reference",
+                "arguments": {"reference_path": ref_path} if ref_path else {},
+            })
+        elif selected_action == ActionType.RETRIEVE_REFERENCE:
+            tool_calls.append({
+                "name": "retrieve_normal_reference",
+                "arguments": {"category": state.category or "industrial_component"},
+            })
         elif selected_action == ActionType.RELOCALIZE:
             tool_calls.append({
                 "name": "localize_candidate",
@@ -123,7 +141,6 @@ def planner_node(state: HJLState) -> dict[str, Any]:
                 "arguments": {"angle": 90.0},
             })
         elif selected_action == ActionType.RETRY_TOOL:
-            # Retry with adjusted fallback
             tool_calls.append({
                 "name": "crop_region",
                 "arguments": {"bbox": target_bbox},

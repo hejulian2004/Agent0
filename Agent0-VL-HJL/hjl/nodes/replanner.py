@@ -16,11 +16,21 @@ def replanner_node(state: HJLState) -> dict[str, Any]:
     if stop_reason is not None:
         return {"stop_reason": stop_reason}
 
-    # 2. Check if action mask is empty
+    # 2. Deterministic transition: If reference was just retrieved and available, transition to CROSS_VALIDATE
+    if (
+        state.selected_action == ActionType.RETRIEVE_REFERENCE
+        and state.evidence_state.normal_references
+    ):
+        return {
+            "selected_action": ActionType.CROSS_VALIDATE,
+            "allowed_actions": [ActionType.CROSS_VALIDATE],
+        }
+
+    # 3. Check if action mask is empty
     if not state.allowed_actions:
         return {"stop_reason": StopReason.NO_VALID_ACTION}
 
-    # 3. Select action from the allowed action set
+    # 4. Select action from the allowed action set
     allowed = state.allowed_actions
     selected_action: ActionType = allowed[0]
 

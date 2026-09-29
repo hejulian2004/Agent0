@@ -1,4 +1,4 @@
-"""Unit tests for HJL tool adapters and context isolation."""
+"""Unit tests for HJL tool adapters, anti-leakage validation, and context isolation."""
 
 from __future__ import annotations
 
@@ -8,7 +8,11 @@ from pathlib import Path
 from PIL import Image
 
 from agent0_protocol.tools import ToolExecutionContext, get_tool_registry
-from hjl.tools_adapter import ToolResult, execute_adapted_tool
+from hjl.tools_adapter import (
+    ToolResult,
+    execute_adapted_tool,
+    validate_reference_metadata,
+)
 
 
 class TestHJLTools(unittest.TestCase):
@@ -20,9 +24,16 @@ class TestHJLTools(unittest.TestCase):
         self.image_path = Path(self.tmp.name)
         self.context = ToolExecutionContext(image=self.image_path)
 
+        # Create a distinct reference image
+        self.ref_tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        ref_img = Image.new("RGB", (60, 40), color="red")
+        ref_img.save(self.ref_tmp.name)
+        self.ref_path = Path(self.ref_tmp.name)
+
     def tearDown(self):
         self.context.close()
         self.image_path.unlink(missing_ok=True)
+        self.ref_path.unlink(missing_ok=True)
 
     def test_crop_region_tool_result(self):
         result = execute_adapted_tool("crop_region", {"bbox": [0, 0, 20, 20]}, self.context)
@@ -39,30 +50,60 @@ class TestHJLTools(unittest.TestCase):
     def test_rotate_image_tool_result(self):
         result = execute_adapted_tool("rotate_image", {"angle": 90.0}, self.context)
         self.assertTrue(result.success)
-        # 60x40 rotated 90 degrees becomes 40x60
         self.assertEqual(result.metadata["image_size"], [40, 60])
 
     def test_retrieve_normal_reference_tool_result(self):
-        result = execute_adapted_tool("retrieve_normal_reference", {"query": "standard metal surface"}, self.context)
+        result = execute_adapted_tool("retrieve_normal_reference", {"category": "metal_casting"}, self.context)
         self.assertTrue(result.success)
-        self.assertIn("results", result.metadata)
+        self.assertIn("reference_path", result.metadata)
+        self.assertEqual(result.metadata.get("split"), "train")
+        self.assertTrue(result.metadata.get("is_normal"))
+
+    def test_reference_anti_leakage_runtime_validation(self):
+        """Reference metadata must strictly be train-split normal samples."""
+        valid_meta = {"split": "train", "is_normal": True, "category": "metal"}
+        validate_reference_metadata(valid_meta)  # Should pass
+
+        # Test leakage rejection
+        with self.assertRaises(ValueError) as ctx:
+            validate_reference_metadata({"split": "test", "is_normal": True})
+        self.assertIn("Reference leakage detected", str(ctx.exception))
+
+        # Abnormal reference rejection
+        with self.assertRaises(ValueError) as ctx:
+            validate_reference_metadata({"split": "train", "is_normal": False})
+        self.assertIn("confirmed normal", str(ctx.exception))
 
     def test_compare_with_reference_tool_result(self):
-        result = execute_adapted_tool("compare_with_reference", {}, self.context)
+        result = execute_adapted_tool(
+            "compare_with_reference",
+            {"reference_path": str(self.ref_path)},
+            self.context,
+        )
         self.assertTrue(result.success)
         self.assertIn("similarity", result.metadata)
         self.assertGreaterEqual(result.metadata["similarity"], 0.0)
 
-    def test_localize_candidate_tool_result(self):
-        result = execute_adapted_tool("localize_candidate", {}, self.context)
-        self.assertTrue(result.success)
-        self.assertIn("candidate_regions", result.metadata)
-        self.assertTrue(len(result.metadata["candidate_regions"]) > 0)
+    def test_compare_with_reference_rejects_missing_path(self):
+        result = execute_adapted_tool("compare_with_reference", {}, self.context)
+        self.assertFalse(result.success)
+        self.assertIn("Missing required argument 'reference_path'", result.error or "")
+
+    def test_compare_with_reference_rejects_self_comparison(self):
+        """Comparing the active image against itself must be strictly rejected."""
+        curr_path = self.context["current_image_path"]
+        result = execute_adapted_tool(
+            "compare_with_reference",
+            {"reference_path": curr_path},
+            self.context,
+        )
+        self.assertFalse(result.success)
+        self.assertIn("Self-comparison rejected", result.error or "")
 
     def test_unknown_tool_fails_gracefully(self):
         result = execute_adapted_tool("nonexistent_tool", {}, self.context)
         self.assertFalse(result.success)
-        self.assertIn("Unknown tool", result.error)
+        self.assertIn("Unknown tool", result.error or "")
 
     def test_tool_context_rollback_on_failure(self):
         initial_path = self.context["current_image_path"]

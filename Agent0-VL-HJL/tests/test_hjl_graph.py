@@ -7,14 +7,23 @@ import unittest
 from pathlib import Path
 from PIL import Image
 
+from agent0_protocol.tools import ToolExecutionContext
+from hjl.config import HJLConfig
 from hjl.graph import create_hjl_graph
+from hjl.nodes.evidence_extractor import evidence_extractor_node
 from hjl.nodes.evidence_updater import evidence_updater_node
 from hjl.nodes.evidence_verifier import evidence_verifier_node
 from hjl.nodes.failure_diagnoser import failure_diagnoser_node
+from hjl.nodes.finalizer import finalizer_node
 from hjl.nodes.global_verifier import global_verifier_node
 from hjl.nodes.planner import planner_node
 from hjl.nodes.regional_verifier import regional_verifier_node
 from hjl.nodes.replanner import replanner_node
+from hjl.nodes.state_updaters import (
+    candidate_state_updater_node,
+    comparison_evidence_extractor_node,
+    reference_state_updater_node,
+)
 from hjl.nodes.tool_executor import tool_executor_node
 from hjl.state import EvidenceItem, EvidenceRelation, EvidenceState, HJLPhase, HJLState, StopReason
 from hjl.taxonomy import (
@@ -33,6 +42,10 @@ class TestHJLGraph(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
         img = Image.new("RGB", (100, 100), color="gray")
+        # Draw a small defect area
+        for x in range(10, 20):
+            for y in range(10, 20):
+                img.putpixel((x, y), (20, 20, 20))
         img.save(self.tmp.name)
         self.image_path = self.tmp.name
 
@@ -59,7 +72,7 @@ class TestHJLGraph(unittest.TestCase):
             observations=[{
                 "step": 1,
                 "tool": "crop_region",
-                "metadata": {"image_size": [5, 5], "bbox": [0, 0, 5, 5]},  # Degenerate crop
+                "metadata": {"image_size": [5, 5], "bbox": [0, 0, 5, 5]},  # Degenerate crop < 12px
             }],
         )
         # 1. Regional verifier evaluates observation
@@ -67,11 +80,9 @@ class TestHJLGraph(unittest.TestCase):
         self.assertEqual(v_res["regional_judgment"].status, RegionalStatus.FAIL)
 
         # 2. Confirm evidence_updater is NOT executed on FAIL
-        # Initial evidence items count is 0
         self.assertEqual(len(state.evidence_state.evidence_items), 0)
 
-        # If evidence_updater was mistakenly called, it would have added an item
-        # Since graph routes to failure_diagnoser on FAIL, evidence_updater is skipped
+        # 3. Diagnosis confirms LOW_RESOLUTION
         d_res = failure_diagnoser_node(HJLState(
             sample_id="test_inv2",
             image_path=self.image_path,
@@ -144,7 +155,6 @@ class TestHJLGraph(unittest.TestCase):
     def test_invariant_6_zero_score_without_positive_evidence_never_normal(self):
         """Zero initial anomaly score with empty evidence list must NEVER conclude NORMAL."""
         state_empty = HJLState(sample_id="test_inv6", image_path=self.image_path)
-        # Empty evidence state
         self.assertEqual(state_empty.evidence_state.anomaly_score, 0.0)
         self.assertEqual(len(state_empty.evidence_state.evidence_items), 0)
 
@@ -155,23 +165,87 @@ class TestHJLGraph(unittest.TestCase):
         self.assertEqual(ev_res["phase"], HJLPhase.EVIDENCE_RESOLUTION)
 
     def test_invariant_7_golden_multi_step_trajectory(self):
-        """Test full graph execution running end-to-end to definitive conclusion."""
-        graph = create_hjl_graph()
-        initial_state = HJLState(
-            sample_id="test_golden",
-            image_path=self.image_path,
-            max_steps=5,
-        )
-        final_state = graph.run(initial_state)
+        """Verify the complete multi-step trajectory and crucial state invariants end-to-end.
 
-        # Graph completes and reaches final prediction
-        self.assertIsNotNone(final_state.final_prediction)
-        self.assertIn(final_state.stop_reason, [
-            StopReason.CONFIRMED_ANOMALY,
-            StopReason.CONFIRMED_NORMAL,
-            StopReason.MAX_STEPS,
-        ])
-        self.assertGreaterEqual(final_state.current_step, 1)
+        Prescribed path:
+        1. Global PASS -> Hypothesis formation
+        2. Valid small crop (6x6) -> Tool SUCCESS -> Regional FAIL (LOW_RESOLUTION)
+        3. Regional FAIL leaves evidence_items empty (unpolluted) and anomaly_score == 0.0
+        4. Diagnosis: LOW_RESOLUTION -> Replanner: ENHANCE_REGION
+        5. Zoom (12x12) -> Tool SUCCESS -> Regional PASS
+        6. Evidence Extractor extracts zoomed ROI -> Evidence Updater records NEUTRAL (score remains 0.0)
+        7. Evidence Verifier yields FAIL (MISSING_REFERENCE) -> Action Mask {RETRIEVE_REFERENCE}
+        8. Tool Executor retrieves train-normal reference -> ReferenceStateUpdater transitions to CROSS_VALIDATE
+        9. Planner issues compare_with_reference with explicit reference_path
+        10. Comparison yields difference (similarity < 0.8) -> Evidence Updater sets anomaly_score = 0.8
+        11. Evidence Verifier yields PASS (ANOMALY) -> Finalizer terminates with CONFIRMED_ANOMALY
+        """
+        config = HJLConfig(
+            anomaly_threshold=0.75,
+            normal_threshold=0.20,
+            reference_similarity_threshold=0.80,
+            max_steps=10,
+        )
+        context = ToolExecutionContext(image=self.image_path)
+
+        try:
+            graph = create_hjl_graph(context=context, config=config)
+
+            # Initialize state with candidate region having a 6x6 target bbox: [10, 10, 16, 16]
+            initial_state = HJLState(
+                sample_id="test_golden",
+                image_path=self.image_path,
+                category="metal_casting",
+                max_steps=10,
+                candidate_regions=[{
+                    "bbox": [10, 10, 16, 16],
+                    "confidence": 0.85,
+                    "label": "small_crack_candidate",
+                }],
+            )
+
+            final_state = graph.run(initial_state)
+
+            # 1. Terminal Outcome Verification
+            self.assertEqual(final_state.stop_reason, StopReason.CONFIRMED_ANOMALY)
+            self.assertIsNotNone(final_state.final_prediction)
+            self.assertEqual(final_state.final_prediction["conclusion"], "ANOMALY")
+            self.assertTrue(final_state.final_prediction["is_anomaly"])
+            self.assertFalse(final_state.final_prediction["best_effort"])
+
+            # 2. State Invariants across execution steps
+            # Check regional fail step: Regional FAIL occurred and did NOT increase evidence
+            hist = final_state.step_history
+            self.assertTrue(len(hist) > 0)
+
+            # Find regional verifier transitions
+            reg_fail_entries = [h for h in hist if h.get("node") == "regional_verifier" and h.get("regional_judgment") and h["regional_judgment"].get("status") == "FAIL"]
+            self.assertTrue(len(reg_fail_entries) >= 1, "Expected at least one Regional FAIL step")
+            self.assertEqual(reg_fail_entries[0]["regional_judgment"]["status"], "FAIL")
+
+            # Diagnoser immediately classifies LOW_RESOLUTION following regional fail
+            diag_entries = [h for h in hist if h.get("node") == "failure_diagnoser"]
+            self.assertTrue(len(diag_entries) >= 1)
+            self.assertEqual(diag_entries[0]["failure_type"], "LOW_RESOLUTION")
+
+            # Check that reference was retrieved and transition to CROSS_VALIDATE occurred
+            retrieve_entries = [h for h in hist if h.get("tool_call") and h["tool_call"].get("name") == "retrieve_normal_reference"]
+            self.assertTrue(len(retrieve_entries) >= 1, "Expected retrieve_normal_reference tool call")
+
+            compare_entries = [h for h in hist if h.get("tool_call") and h["tool_call"].get("name") == "compare_with_reference"]
+            self.assertTrue(len(compare_entries) >= 1, "Expected compare_with_reference tool call")
+
+            # Invariant: compare_with_reference received explicit reference_path argument
+            comp_args = compare_entries[0]["tool_call"]["arguments"]
+            self.assertIn("reference_path", comp_args)
+            self.assertTrue(len(comp_args["reference_path"]) > 0)
+
+            # Invariant: Evidence accumulation produced terminal anomaly score
+            self.assertGreaterEqual(final_state.evidence_state.anomaly_score, 0.75)
+            self.assertGreaterEqual(len(final_state.evidence_state.supporting_evidence), 1)
+
+        finally:
+            context.close()
 
 
 if __name__ == "__main__":

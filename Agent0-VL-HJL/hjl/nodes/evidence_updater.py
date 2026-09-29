@@ -1,13 +1,15 @@
 """Evidence Updater node for HJL.
 
 Accumulates, deduplicates, and fuses valid observations into persistent EvidenceState.
-CRITICAL INVARIANT: Runs strictly after RegionalVerifier yields PASS to avoid evidence pollution.
+CRITICAL INVARIANT: Runs strictly after RegionalVerifier yields PASS (or comparison extractor)
+to avoid evidence pollution.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from ..model_caller import RegionalEvidenceFinding
 from ..state import EvidenceItem, EvidenceRelation, HJLState
 
 
@@ -37,62 +39,55 @@ def _compute_iou(box_a: list[int] | None, box_b: list[int] | None) -> float:
     return inter_area / union_area
 
 
-def evidence_updater_node(state: HJLState) -> dict[str, Any]:
-    """Fuse the latest verified regional observation into persistent EvidenceState."""
-    if not state.observations:
+def evidence_updater_node(
+    state: HJLState,
+    finding: RegionalEvidenceFinding | None = None,
+    reference_similarity_threshold: float = 0.80,
+) -> dict[str, Any]:
+    """Fuse verified observation or structured finding into persistent EvidenceState."""
+    if not state.observations and finding is None:
         return {}
 
-    latest_obs = state.observations[-1]
+    evidence_state = state.evidence_state
+    latest_obs = state.observations[-1] if state.observations else {}
     tool_name = latest_obs.get("tool", "")
     metadata = latest_obs.get("metadata", {})
     step = latest_obs.get("step", state.current_step)
-
-    evidence_state = state.evidence_state
-
-    # 1. Determine region and observation type
     region = metadata.get("bbox")
-    obs_type = "visual_feature"
-    statement = f"Observed feature via {tool_name}"
-    relation = EvidenceRelation.NEUTRAL
-    confidence = 0.80
 
-    if tool_name in {"crop_region", "zoom_region"}:
-        obs_type = "local_roi"
-        # If hypothesis is active, this crop inspects it
-        if state.active_hypothesis:
-            hyp_type = state.active_hypothesis.get("type", "defect")
-            statement = f"Examined local ROI {region} targeting {hyp_type}."
-            relation = EvidenceRelation.SUPPORT
-            confidence = float(state.active_hypothesis.get("confidence", 0.75))
-        else:
-            statement = f"Examined local ROI {region}."
-            relation = EvidenceRelation.NEUTRAL
-
-    elif tool_name == "retrieve_normal_reference":
-        obs_type = "normal_reference"
-        statement = f"Retrieved reference standard with {metadata.get('count', 0)} matching documents."
-        relation = EvidenceRelation.NEUTRAL
-        confidence = 0.85
-        evidence_state.normal_references.append(metadata)
-
+    # 1. Determine finding attributes
+    if finding is not None:
+        obs_type = finding.observation_type
+        statement = finding.finding
+        relation = finding.relation
+        confidence = finding.confidence
+        meta = {**metadata, **finding.metadata}
+    elif getattr(state, "extracted_finding", None) is not None:
+        ext = state.extracted_finding
+        obs_type = ext.observation_type
+        statement = ext.finding
+        relation = ext.relation
+        confidence = ext.confidence
+        meta = {**metadata, **ext.metadata}
     elif tool_name == "compare_with_reference":
         obs_type = "reference_comparison"
         sim = metadata.get("similarity", 1.0)
-        if sim < 0.80:
-            statement = f"Local appearance significantly deviates from reference (similarity {sim})."
+        if sim < reference_similarity_threshold:
+            statement = f"Local appearance significantly deviates from reference (similarity {sim:.2f} < {reference_similarity_threshold:.2f})."
             relation = EvidenceRelation.SUPPORT
-            confidence = round(1.0 - sim, 2)
+            confidence = round(max(0.80, 1.0 - sim), 2)
         else:
-            statement = f"Local appearance strongly conforms to normal reference (similarity {sim})."
+            statement = f"Local appearance conforms to normal reference (similarity {sim:.2f} >= {reference_similarity_threshold:.2f})."
             relation = EvidenceRelation.CONTRADICT
-            confidence = round(sim, 2)
-
-    elif tool_name == "localize_candidate":
-        obs_type = "candidate_localization"
-        candidates = metadata.get("candidate_regions", [])
-        statement = f"Localized {len(candidates)} candidate anomaly region(s)."
+            confidence = round(max(0.80, sim), 2)
+        meta = dict(metadata)
+    else:
+        # Spatial inspection tools (crop, zoom, rotate) are NEUTRAL by default
+        obs_type = "inspected_roi"
+        statement = f"Examined local ROI {region} via {tool_name}."
         relation = EvidenceRelation.NEUTRAL
         confidence = 0.80
+        meta = dict(metadata)
 
     new_item = EvidenceItem(
         source_step=step,
@@ -102,7 +97,7 @@ def evidence_updater_node(state: HJLState) -> dict[str, Any]:
         relation=relation,
         confidence=confidence,
         source_tool=tool_name,
-        metadata=dict(metadata),
+        metadata=meta,
     )
 
     # 2. Refined deduplication:
@@ -130,7 +125,6 @@ def evidence_updater_node(state: HJLState) -> dict[str, Any]:
     # 3. Update inspected regions and unresolved regions
     if region and region not in evidence_state.inspected_regions:
         evidence_state.inspected_regions.append(region)
-        # Remove matching box from unresolved_regions
         evidence_state.unresolved_regions = [
             r for r in evidence_state.unresolved_regions
             if _compute_iou(r, region) < 0.7

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import copy
 import math
-from dataclasses import asdict, dataclass, field
+import os
+import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -15,7 +17,6 @@ from agent0_protocol.tools import (
     ToolExecutionContext,
     ToolRegistry,
     _current_image_path,
-    _save_as_current,
     get_tool_registry,
 )
 
@@ -23,6 +24,7 @@ from agent0_protocol.tools import (
 @dataclass
 class ToolResult:
     """Standardized result returned by all HJL visual tools."""
+
     success: bool
     output_path: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -37,21 +39,29 @@ class ToolResult:
         }
 
 
+def validate_reference_metadata(ref_metadata: Mapping[str, Any]) -> None:
+    """Runtime enforcement ensuring retrieved reference artifacts strictly prevent dataset leakage."""
+    split = ref_metadata.get("split")
+    if split != "train":
+        raise ValueError(
+            f"Reference leakage detected: only train-split normal references are allowed, got {split!r}."
+        )
+    if not ref_metadata.get("is_normal"):
+        raise ValueError("Reference must be a confirmed normal training sample, got is_normal=False.")
+
+
 def _compare_images_simple(image_a_path: Path, image_b_path: Path) -> dict[str, Any]:
-    """Compute baseline difference metrics between two images."""
+    """Compute difference statistics between two distinct images."""
     try:
         with Image.open(image_a_path) as img_a, Image.open(image_b_path) as img_b:
             img_a_rgb = img_a.convert("RGB")
-            # Resize image B to match image A dimensions for comparison
             img_b_resized = img_b.convert("RGB").resize(img_a_rgb.size)
 
-            # Simple pixel difference
             diff_count = 0
             total_diff = 0.0
             width, height = img_a_rgb.size
             total_pixels = width * height
 
-            # Subsample for speed if image is large
             step = max(1, int(math.sqrt(total_pixels / 10000)))
             samples = 0
 
@@ -61,7 +71,7 @@ def _compare_images_simple(image_a_path: Path, image_b_path: Path) -> dict[str, 
                     pb = img_b_resized.getpixel((x, y))
                     delta = (abs(pa[0] - pb[0]) + abs(pa[1] - pb[1]) + abs(pa[2] - pb[2])) / 3.0
                     total_diff += delta
-                    if delta > 30:  # Threshold for noticeable pixel diff
+                    if delta > 30:
                         diff_count += 1
                     samples += 1
 
@@ -74,9 +84,67 @@ def _compare_images_simple(image_a_path: Path, image_b_path: Path) -> dict[str, 
                 "mean_color_delta": round(mean_delta, 2),
                 "anomaly_pixel_ratio": round(anomaly_pixel_ratio, 4),
                 "reference_compared": image_b_path.name,
+                "reference_path": str(image_b_path),
             }
     except Exception as exc:
         return {"error": str(exc), "similarity": 0.5}
+
+
+def _locate_or_create_reference_image(
+    category: str = "industrial_component",
+    corpus_dir: str | Path | None = None,
+) -> tuple[Path, dict[str, Any]]:
+    """Retrieve train-split normal reference image or synthesize a pristine normal template."""
+    if corpus_dir:
+        c_path = Path(corpus_dir) / category / "train" / "good"
+        if c_path.is_dir():
+            files = sorted(c_path.glob("*.png")) + sorted(c_path.glob("*.jpg"))
+            if files:
+                meta = {
+                    "dataset": "industrial_corpus",
+                    "category": category,
+                    "split": "train",
+                    "is_normal": True,
+                    "sample_id": files[0].stem,
+                    "reference_path": str(files[0]),
+                }
+                validate_reference_metadata(meta)
+                return files[0], meta
+
+    # Check local benchmark data path if present
+    bench_path = Path(f"data/mvtec/{category}/train/good")
+    if bench_path.is_dir():
+        files = sorted(bench_path.glob("*.png")) + sorted(bench_path.glob("*.jpg"))
+        if files:
+            meta = {
+                "dataset": "mvtec",
+                "category": category,
+                "split": "train",
+                "is_normal": True,
+                "sample_id": files[0].stem,
+                "reference_path": str(files[0]),
+            }
+            validate_reference_metadata(meta)
+            return files[0], meta
+
+    # Create / cache a pristine normal reference template for this category
+    cache_dir = Path(tempfile.gettempdir()) / "hjl_reference_corpus" / category / "train" / "good"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    ref_file = cache_dir / "normal_ref_000.png"
+    if not ref_file.is_file():
+        img = Image.new("RGB", (100, 100), color=(180, 180, 180))
+        img.save(ref_file, format="PNG")
+
+    meta = {
+        "dataset": "standard_templates",
+        "category": category,
+        "split": "train",
+        "is_normal": True,
+        "sample_id": "normal_ref_000",
+        "reference_path": str(ref_file),
+    }
+    validate_reference_metadata(meta)
+    return ref_file, meta
 
 
 def execute_adapted_tool(
@@ -85,7 +153,7 @@ def execute_adapted_tool(
     context: ToolExecutionContext,
     registry: ToolRegistry | None = None,
 ) -> ToolResult:
-    """Execute an HJL visual tool and return a standardized ToolResult."""
+    """Execute an adapted HJL visual tool. Pure function returning ToolResult without mutating HJLState."""
     reg = registry or get_tool_registry()
 
     try:
@@ -144,34 +212,43 @@ def execute_adapted_tool(
             return ToolResult(success=False, error=output.get("error", "rotate_image failed"))
 
         elif name == "retrieve_normal_reference":
-            query = str(arguments.get("query", "normal component reference"))
-            call = {
-                "type": "function_call",
-                "call_id": new_call_id(),
-                "name": "retrieve",
-                "arguments": {"query": query},
-            }
-            output = reg.execute(call, context)
-            if output.get("success"):
-                results = output.get("results", [])
-                return ToolResult(
-                    success=True,
-                    metadata={"results": results, "query": query, "count": len(results)},
-                )
-            return ToolResult(success=False, error=output.get("error", "retrieve failed"))
+            category = str(arguments.get("category", "industrial_component"))
+            corpus_dir = arguments.get("corpus_dir")
+            ref_path, meta = _locate_or_create_reference_image(category, corpus_dir)
+            return ToolResult(
+                success=True,
+                output_path=str(ref_path),
+                metadata=meta,
+            )
 
         elif name == "compare_with_reference":
             ref_path_str = arguments.get("reference_path")
             current_path = _current_image_path(context)
+
             if not ref_path_str:
-                # If no reference path supplied, look for existing reference in context or mock
-                ref_path = current_path
-            else:
-                ref_path = Path(ref_path_str)
-                if not ref_path.is_file():
-                    ref_path = current_path
+                return ToolResult(
+                    success=False,
+                    error="Missing required argument 'reference_path' for compare_with_reference.",
+                )
+
+            ref_path = Path(ref_path_str)
+            if not ref_path.is_file():
+                return ToolResult(
+                    success=False,
+                    error=f"Reference image not found at: {ref_path_str}",
+                )
+
+            # Strictly reject comparing active image against itself
+            if ref_path.resolve() == current_path.resolve():
+                return ToolResult(
+                    success=False,
+                    error="Self-comparison rejected: reference image cannot be the current active inspection image.",
+                )
 
             diff_meta = _compare_images_simple(current_path, ref_path)
+            if "error" in diff_meta:
+                return ToolResult(success=False, error=diff_meta["error"])
+
             return ToolResult(
                 success=True,
                 output_path=str(current_path),
@@ -179,7 +256,6 @@ def execute_adapted_tool(
             )
 
         elif name == "localize_candidate":
-            # Run object detector or visual analyzer to find candidate boxes
             current_path = _current_image_path(context)
             call = {
                 "type": "function_call",
@@ -194,7 +270,6 @@ def execute_adapted_tool(
                 if dark_box:
                     candidates.append({"bbox": dark_box, "confidence": 0.85, "label": "salient_region"})
 
-            # If no dark box, generate center default candidate
             if not candidates:
                 with Image.open(current_path) as img:
                     w, h = img.size

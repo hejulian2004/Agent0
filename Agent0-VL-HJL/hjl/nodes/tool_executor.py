@@ -31,7 +31,7 @@ def tool_executor_node(
     if exec_context is None:
         exec_context = ToolExecutionContext(image=state.image_path)
 
-    # Save checkpoint before tool call for rollback if needed
+    # Save checkpoint before tool call for potential rollback
     exec_context.save_checkpoint()
 
     # Increment step counter and tool cost
@@ -69,9 +69,13 @@ def tool_executor_node(
             "failure_type": FailureType.TOOL_FAILURE,
             "failure_reason": error_msg,
             "allowed_actions": allowed_actions,
+            "selected_action": ActionType.RETRY_TOOL,
         }
 
-    # 2. Tool Execution Success path
+    # 2. Tool Execution Success path -> Commit checkpoint (discard intermediate snapshot)
+    if hasattr(exec_context, "_checkpoints") and exec_context._checkpoints:
+        exec_context._checkpoints.pop()
+
     consecutive_failures = 0
     obs = {
         "step": current_step,
@@ -82,17 +86,10 @@ def tool_executor_node(
     }
     observations.append(obs)
 
-    # Update candidate regions if localize_candidate returned candidates
-    candidate_regions = list(state.candidate_regions)
-    if name == "localize_candidate" and "candidate_regions" in tool_result.metadata:
-        new_candidates = tool_result.metadata["candidate_regions"]
-        if new_candidates:
-            candidate_regions = new_candidates
-            state.evidence_state.unresolved_regions = [c["bbox"] for c in new_candidates if "bbox" in c]
-
     return {
         "current_step": current_step,
         "consecutive_tool_failures": consecutive_failures,
         "observations": observations,
-        "candidate_regions": candidate_regions,
+        "failure_type": None,
+        "failure_reason": None,
     }

@@ -1,4 +1,8 @@
-"""Checkpoint 2: Regional Verifier node for HJL."""
+"""Checkpoint 2: Regional Verifier node for HJL.
+
+Strictly verifies validity, resolution, sharpness, and alignment of the cropped ROI.
+Does NOT perform defect recognition or anomaly classification.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +13,7 @@ from ..taxonomy import CheckpointJudgment, RegionalStatus
 
 
 def regional_verifier_node(state: HJLState) -> dict[str, Any]:
-    """Verify validity, quality, and relevance of the current regional tool observation."""
+    """Verify quality, resolution, and relevance of the current regional tool observation."""
     if not state.observations:
         judgment = CheckpointJudgment(
             status=RegionalStatus.FAIL,
@@ -22,14 +26,14 @@ def regional_verifier_node(state: HJLState) -> dict[str, Any]:
     tool_name = latest_obs.get("tool", "")
     metadata = latest_obs.get("metadata", {})
 
-    # Evaluate crop / zoom resolution and validity
+    # Evaluate crop / zoom resolution and boundary validity
     if tool_name in {"crop_region", "zoom_region"}:
         size = metadata.get("image_size")
         if size and (size[0] < 12 or size[1] < 12):
             judgment = CheckpointJudgment(
                 status=RegionalStatus.FAIL,
                 judgment_confidence=0.85,
-                reason=f"ROI resolution [{size[0]}x{size[1]}] is insufficient to inspect fine defect textures.",
+                reason=f"ROI resolution [{size[0]}x{size[1]}] is insufficient (<12px) to inspect fine defect textures.",
             )
             return {"regional_judgment": judgment}
 
@@ -39,24 +43,23 @@ def regional_verifier_node(state: HJLState) -> dict[str, Any]:
             judgment = CheckpointJudgment(
                 status=RegionalStatus.FAIL,
                 judgment_confidence=0.85,
-                reason=f"Cropped bounding box {bbox} is too narrow or misses the anomaly feature.",
+                reason=f"Cropped bounding box {bbox} is too narrow (<8px) or misses target structure.",
             )
             return {"regional_judgment": judgment}
 
-    # Reference comparison verification
-    elif tool_name == "compare_with_reference":
+    elif tool_name == "rotate_image":
         if "error" in metadata:
             judgment = CheckpointJudgment(
                 status=RegionalStatus.FAIL,
-                judgment_confidence=0.80,
-                reason=f"Reference comparison failed: {metadata['error']}",
+                judgment_confidence=0.85,
+                reason=f"Image rotation failed: {metadata['error']}",
             )
             return {"regional_judgment": judgment}
 
-    # All checks passed
+    # Pure ROI quality checks passed
     judgment = CheckpointJudgment(
         status=RegionalStatus.PASS,
         judgment_confidence=0.90,
-        reason=f"Regional observation from tool {tool_name} is valid, sharp, and feature-relevant.",
+        reason=f"Regional observation from {tool_name} is sharp, sufficiently resolved, and orientation-aligned.",
     )
     return {"regional_judgment": judgment}

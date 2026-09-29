@@ -1,8 +1,4 @@
-"""Lightweight, deterministic StateGraph implementation for HJL.
-
-Mirrors LangGraph's API signatures (START, END, add_node, add_edge, add_conditional_edges, run)
-with zero external unpinned dependencies.
-"""
+"""Lightweight, deterministic StateGraph implementation for HJL with tool-type routing."""
 
 from __future__ import annotations
 
@@ -10,7 +6,12 @@ import copy
 import logging
 from typing import Any, Callable
 
-from .state import HJLState, StopReason
+from agent0_protocol.tools import ToolExecutionContext
+
+from .config import HJLConfig
+from .model_caller import HJLModelCaller
+from .state import HJLPhase, HJLState, StopReason
+from .taxonomy import EvidenceStatus, FailureType, GlobalStatus, RegionalStatus
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ class CompiledGraph:
         self.entry_point = entry_point
 
     def run(self, initial_state: HJLState, max_graph_transitions: int = 100) -> HJLState:
-        """Execute state through graph until END or a StopReason is reached."""
+        """Execute state through graph until END or a terminal condition is reached."""
         state = initial_state
         current_node = self.entry_point
         transitions = 0
@@ -59,6 +60,25 @@ class CompiledGraph:
                 for k, v in result.items():
                     if hasattr(state, k):
                         setattr(state, k, v)
+
+            # Record granular step transition snapshot into step_history
+            snapshot = {
+                "transition": transitions,
+                "node": current_node,
+                "step": state.current_step,
+                "phase": state.phase.value if hasattr(state.phase, "value") else str(state.phase),
+                "hypothesis": copy.deepcopy(state.active_hypothesis),
+                "allowed_actions": [a.value if hasattr(a, "value") else str(a) for a in state.allowed_actions],
+                "selected_action": state.selected_action.value if hasattr(state.selected_action, "value") else (str(state.selected_action) if state.selected_action else None),
+                "tool_call": copy.deepcopy(state.tool_calls[0]) if state.tool_calls else None,
+                "latest_observation": copy.deepcopy(state.observations[-1]) if state.observations else None,
+                "regional_judgment": state.regional_judgment.to_dict() if state.regional_judgment else None,
+                "failure_type": state.failure_type.value if hasattr(state.failure_type, "value") else (str(state.failure_type) if state.failure_type else None),
+                "evidence_judgment": state.evidence_judgment.to_dict() if state.evidence_judgment else None,
+                "anomaly_score": round(state.evidence_state.anomaly_score, 4),
+                "stop_reason": state.stop_reason.value if hasattr(state.stop_reason, "value") else (str(state.stop_reason) if state.stop_reason else None),
+            }
+            state.step_history.append(snapshot)
 
             # Check if state reached a terminal stop reason at finalizer
             if current_node == "finalizer":
@@ -132,8 +152,13 @@ class StateGraph:
         )
 
 
-def create_hjl_graph() -> CompiledGraph:
-    """Build and compile the canonical Hierarchical Judgment Loop graph."""
+def create_hjl_graph(
+    context: ToolExecutionContext | None = None,
+    config: HJLConfig | None = None,
+    model_caller: HJLModelCaller | None = None,
+) -> CompiledGraph:
+    """Build and compile the canonical Hierarchical Judgment Loop graph with tool-type routing."""
+    from .nodes.evidence_extractor import evidence_extractor_node
     from .nodes.evidence_updater import evidence_updater_node
     from .nodes.evidence_verifier import evidence_verifier_node
     from .nodes.failure_diagnoser import failure_diagnoser_node
@@ -144,20 +169,56 @@ def create_hjl_graph() -> CompiledGraph:
     from .nodes.planner import planner_node
     from .nodes.regional_verifier import regional_verifier_node
     from .nodes.replanner import replanner_node
+    from .nodes.state_updaters import (
+        candidate_state_updater_node,
+        comparison_evidence_extractor_node,
+        reference_state_updater_node,
+    )
     from .nodes.tool_executor import tool_executor_node
-    from .taxonomy import EvidenceStatus, FailureType, GlobalStatus, RegionalStatus
+
+    cfg = config or HJLConfig()
 
     workflow = StateGraph(state_schema=HJLState)
 
-    workflow.add_node("global_inspector", global_inspector_node)
+    # Wrap nodes with bound dependencies
+    workflow.add_node("global_inspector", lambda s: global_inspector_node(s, model_caller=model_caller))
     workflow.add_node("hypothesis_generator", hypothesis_generator_node)
-    workflow.add_node("global_verifier", global_verifier_node)
+    workflow.add_node(
+        "global_verifier",
+        lambda s: global_verifier_node(
+            s, global_normal_confidence_threshold=cfg.global_normal_confidence_threshold
+        ),
+    )
     workflow.add_node("planner", planner_node)
-    workflow.add_node("tool_executor", tool_executor_node)
+    workflow.add_node("tool_executor", lambda s: tool_executor_node(s, context=context))
     workflow.add_node("regional_verifier", regional_verifier_node)
-    workflow.add_node("evidence_updater", evidence_updater_node)
-    workflow.add_node("evidence_verifier", evidence_verifier_node)
-    workflow.add_node("failure_diagnoser", failure_diagnoser_node)
+    workflow.add_node("evidence_extractor", lambda s: evidence_extractor_node(s, model_caller=model_caller))
+    workflow.add_node("reference_state_updater", reference_state_updater_node)
+    workflow.add_node(
+        "comparison_evidence_extractor",
+        lambda s: comparison_evidence_extractor_node(
+            s, reference_similarity_threshold=cfg.reference_similarity_threshold
+        ),
+    )
+    workflow.add_node(
+        "candidate_state_updater",
+        lambda s: candidate_state_updater_node(s, max_discovery_attempts=cfg.max_discovery_attempts),
+    )
+    workflow.add_node(
+        "evidence_updater",
+        lambda s: evidence_updater_node(s, reference_similarity_threshold=cfg.reference_similarity_threshold),
+    )
+    workflow.add_node(
+        "evidence_verifier",
+        lambda s: evidence_verifier_node(
+            s,
+            anomaly_threshold=cfg.anomaly_threshold,
+            normal_threshold=cfg.normal_threshold,
+            checkpoint_confidence_threshold=cfg.checkpoint_confidence_threshold,
+            min_evidence_count=cfg.min_evidence_count,
+        ),
+    )
+    workflow.add_node("failure_diagnoser", lambda s: failure_diagnoser_node(s, model_caller=model_caller))
     workflow.add_node("replanner", replanner_node)
     workflow.add_node("finalizer", finalizer_node)
 
@@ -175,21 +236,53 @@ def create_hjl_graph() -> CompiledGraph:
     workflow.add_edge("hypothesis_generator", "planner")
     workflow.add_edge("planner", "tool_executor")
 
+    # Tool-Type-Specific Routing
     def route_tool_executor(state: HJLState) -> str:
         if state.failure_type == FailureType.TOOL_FAILURE:
             return "replanner"
+        if not state.observations:
+            return "replanner"
+
+        latest_tool = state.observations[-1].get("tool", "")
+        if latest_tool in {"crop_region", "zoom_region", "rotate_image"}:
+            return "regional_verifier"
+        elif latest_tool == "retrieve_normal_reference":
+            return "reference_state_updater"
+        elif latest_tool == "compare_with_reference":
+            return "comparison_evidence_extractor"
+        elif latest_tool == "localize_candidate":
+            return "candidate_state_updater"
         return "regional_verifier"
 
     workflow.add_conditional_edges("tool_executor", route_tool_executor)
 
+    # Reference retrieval branch -> Planner (CROSS_VALIDATE)
+    workflow.add_edge("reference_state_updater", "planner")
+
+    # Reference comparison branch -> Evidence Updater -> Evidence Verifier
+    workflow.add_edge("comparison_evidence_extractor", "evidence_updater")
+
+    # Candidate localization branch -> Hypothesis Generator or Planner
+    def route_candidate_updater(state: HJLState) -> str:
+        if state.stop_reason is not None:
+            return "finalizer"
+        if state.candidate_regions and state.active_hypothesis is None:
+            return "hypothesis_generator"
+        return "planner"
+
+    workflow.add_conditional_edges("candidate_state_updater", route_candidate_updater)
+
+    # Spatial ROI branch: Regional Verifier -> Evidence Extractor (PASS) or Failure Diagnoser (FAIL)
     def route_regional(state: HJLState) -> str:
         if state.regional_judgment and state.regional_judgment.status == RegionalStatus.PASS:
-            return "evidence_updater"
+            return "evidence_extractor"
         return "failure_diagnoser"
 
     workflow.add_conditional_edges("regional_verifier", route_regional)
+    workflow.add_edge("evidence_extractor", "evidence_updater")
     workflow.add_edge("evidence_updater", "evidence_verifier")
 
+    # Evidence Verifier -> Finalizer (PASS) or Failure Diagnoser (FAIL)
     def route_evidence(state: HJLState) -> str:
         if state.evidence_judgment and state.evidence_judgment.status == EvidenceStatus.PASS:
             return "finalizer"

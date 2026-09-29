@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..state import HJLPhase, HJLState
+from ..state import EvidenceRelation, HJLPhase, HJLState
 from ..taxonomy import EvidenceConclusion, EvidenceJudgment, EvidenceStatus
 
 
@@ -24,13 +24,21 @@ def evidence_verifier_node(
         judgment = EvidenceJudgment(
             status=EvidenceStatus.PASS,
             conclusion=EvidenceConclusion.ANOMALY,
-            judgment_confidence=0.90,
+            judgment_confidence=checkpoint_confidence_threshold,
             reason=f"Accumulated evidence definitively confirms anomaly (anomaly_score={score:.2f} >= {anomaly_threshold}).",
         )
         return {"evidence_judgment": judgment}
 
-    # 2. Definitive Normal Check with Positive Evidence Guard
-    has_explicit_normal = (len(ev.neutral_evidence) + len(ev.contradicting_evidence)) >= 1
+    # 2. Definitive Normal Check with Strict Positive Evidence Guard
+    has_explicit_normal = any(
+        e.observation_type in {
+            "normal_reference_match",
+            "reference_comparison",
+            "verified_normal_feature",
+        }
+        and e.relation == EvidenceRelation.CONTRADICT
+        for e in ev.evidence_items
+    )
     unresolved_clear = (len(ev.unresolved_regions) == 0 and len(ev.unresolved_questions) == 0)
     has_sufficient_records = len(ev.evidence_items) >= min_evidence_count
 
@@ -57,7 +65,7 @@ def evidence_verifier_node(
     if ev.unresolved_questions:
         reason_parts.append(f"{len(ev.unresolved_questions)} unresolved question(s)")
     if not has_explicit_normal:
-        reason_parts.append("lacks explicit reference-consistent evidence")
+        reason_parts.append("lacks explicit reference-consistent normal evidence")
 
     reason_text = "Evidence insufficient: " + "; ".join(reason_parts) if reason_parts else "Evidence is inconclusive."
 
