@@ -12,6 +12,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **vLLM Compatibility**: Never downgrade vLLM. If the pinned wheel in `requirements.lock` fails on a host, diagnose environment issues directly.
 - **Attention Backend**: FlashAttention source extensions are incompatible with CUDA toolkit headers on this host. All active FSDP paths use PyTorch SDPA (Scaled Dot-Product Attention) and local tensor padding helpers (`verl/utils/attention_padding.py`).
 - **Secrets & Credentials**: Never write API keys or endpoints into `config.yaml` or source files. Pass them via environment variables (e.g., `AGENT0_RESPONSES_API_KEY`, `AGENT0_SANDBOX_ENDPOINT`).
+- **Agent Conventions & Project Memory**: Consult [`AGENTS.md`](AGENTS.md) and [`docs/memory/`](docs/memory/) for shared agent conventions and the [`hjl_tools_restoration.md`](docs/memory/hjl_tools_restoration.md) guide.
+- **Single Agent Only**: Always execute directly as a single agent in the main session; never spawn background subagents.
 
 ---
 
