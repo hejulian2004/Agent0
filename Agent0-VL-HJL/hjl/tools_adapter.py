@@ -163,6 +163,25 @@ def get_hjl_tool_definitions() -> list[dict[str, Any]]:
     return copy.deepcopy(HJL_TOOL_DEFINITIONS)
 
 
+def _is_retriable_error(error: str | None) -> bool:
+    """Classify whether a tool execution failure is transient and eligible for RETRY_TOOL."""
+    if not error:
+        return False
+    text = str(error).lower()
+    return any(
+        x in text
+        for x in (
+            "timeouterror",
+            "timeout",
+            "timed out",
+            "connectionerror",
+            "connection reset",
+            "temporarily unavailable",
+            "temporary failure",
+        )
+    )
+
+
 @dataclass
 class ToolResult:
     """Standardized result returned by all HJL visual tools."""
@@ -328,6 +347,24 @@ def execute_adapted_tool(
     """Execute an adapted HJL visual tool. Pure function returning ToolResult without mutating HJLState."""
     reg = registry or get_tool_registry()
 
+    # 1. Unified JSON Schema validation against HJL_TOOL_DEFINITIONS
+    tool_defs = {t["name"]: t for t in HJL_TOOL_DEFINITIONS}
+    if name not in tool_defs:
+        return ToolResult(success=False, error=f"Unknown tool: {name}", retriable=False)
+
+    try:
+        from jsonschema import Draft202012Validator
+        validator = Draft202012Validator(tool_defs[name]["parameters"])
+        errors = sorted(validator.iter_errors(arguments), key=lambda e: str(e.path))
+        if errors:
+            return ToolResult(
+                success=False,
+                error=f"Schema validation error for '{name}': {errors[0].message}",
+                retriable=False,
+            )
+    except Exception as exc:
+        return ToolResult(success=False, error=f"Schema validator error: {exc}", retriable=False)
+
     try:
         if name == "crop_region":
             if "bbox" not in arguments:
@@ -377,7 +414,8 @@ def execute_adapted_tool(
                     output_path=path,
                     metadata={"image_size": output.get("image_size"), "bbox": bbox},
                 )
-            return ToolResult(success=False, error=output.get("error", "crop_image failed"), retriable=False)
+            err = output.get("error", "crop_image failed")
+            return ToolResult(success=False, error=err, retriable=_is_retriable_error(err))
 
         elif name == "zoom_region":
             if "scale" not in arguments:
@@ -412,7 +450,8 @@ def execute_adapted_tool(
                     output_path=path,
                     metadata=meta,
                 )
-            return ToolResult(success=False, error=output.get("error", "zoom_image failed"), retriable=False)
+            err = output.get("error", "zoom_image failed")
+            return ToolResult(success=False, error=err, retriable=_is_retriable_error(err))
 
         elif name == "rotate_image":
             if "angle" not in arguments:
@@ -444,7 +483,8 @@ def execute_adapted_tool(
                     output_path=path,
                     metadata={"image_size": output.get("image_size"), "angle": angle},
                 )
-            return ToolResult(success=False, error=output.get("error", "rotate_image failed"), retriable=False)
+            err = output.get("error", "rotate_image failed")
+            return ToolResult(success=False, error=err, retriable=_is_retriable_error(err))
 
         elif name == "retrieve_normal_reference":
             if "category" not in arguments:
@@ -571,9 +611,8 @@ def execute_adapted_tool(
             return ToolResult(success=False, error=f"Unknown tool: {name}", retriable=False)
 
     except Exception as exc:
-        is_timeout = (
-            isinstance(exc, (TimeoutError, ConnectionError))
-            or "timeout" in str(exc).lower()
-            or "timed out" in str(exc).lower()
+        return ToolResult(
+            success=False,
+            error=f"{type(exc).__name__}: {exc}",
+            retriable=_is_retriable_error(str(exc)),
         )
-        return ToolResult(success=False, error=f"{type(exc).__name__}: {exc}", retriable=is_timeout)

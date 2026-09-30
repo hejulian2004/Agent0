@@ -585,6 +585,47 @@ class TestHJLGraph(unittest.TestCase):
         self.assertEqual(res["phase"], HJLPhase.HYPOTHESIS_INSPECTION)
         self.assertEqual(len(res["candidate_regions"]), 1)
 
+    def test_tool_budget_allows_final_verification(self):
+        """Tool budget max_steps=3 allows tool #3 to execute and undergo downstream verification."""
+        config = HJLConfig(
+            anomaly_threshold=0.75,
+            normal_threshold=0.20,
+            reference_similarity_threshold=0.80,
+            max_steps=3,
+        )
+        context = ToolExecutionContext(image=self.image_path)
+        context["original_image_path"] = str(self.image_path)
+
+        # Set up a scripted caller where step 1=crop, step 2=zoom, step 3=compare
+        # In our golden trajectory, step 1: crop, step 2: zoom, step 3: retrieve, step 4: compare
+        # For a 3-step test: start with reference already present or start directly with normal reference
+        caller = ScriptedHJLModelCaller(
+            global_inspection=GlobalInspectionResult(
+                observation="Inspecting surface.",
+                candidate_regions=[CandidateRegion(bbox=[20, 20, 80, 80], confidence=0.85)],
+                is_normal=False,
+                confidence=0.85,
+            ),
+        )
+
+        try:
+            graph = create_hjl_graph(context=context, config=config, model_caller=caller, allow_synthetic=True)
+            initial_state = HJLState(
+                sample_id="test_budget_timing",
+                image_path=self.image_path,
+                category="metal_casting",
+                max_steps=3,
+            )
+            final_state = graph.run(initial_state)
+
+            # In this 3-step budget, the graph executed 3 tools: crop, retrieve, compare
+            # Tool #3's comparison was evaluated by evidence_verifier -> reaching CONFIRMED_ANOMALY!
+            self.assertEqual(final_state.current_step, 3)
+            self.assertEqual(final_state.stop_reason, StopReason.CONFIRMED_ANOMALY)
+            self.assertFalse(final_state.final_prediction["best_effort"])
+        finally:
+            context.close()
+
 
 if __name__ == "__main__":
     unittest.main()

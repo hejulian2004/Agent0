@@ -10,6 +10,7 @@ from PIL import Image
 from agent0_protocol.tools import ToolExecutionContext, get_tool_registry
 from hjl.tools_adapter import (
     ToolResult,
+    _is_retriable_error,
     execute_adapted_tool,
     validate_reference_metadata,
 )
@@ -49,7 +50,7 @@ class TestHJLTools(unittest.TestCase):
         res1 = execute_adapted_tool("crop_region", {}, self.context)
         self.assertFalse(res1.success)
         self.assertFalse(res1.retriable)
-        self.assertIn("Missing required argument 'bbox'", res1.error or "")
+        self.assertIn("'bbox'", res1.error or "")
 
         # Invalid geometry: x1 >= x2
         res2 = execute_adapted_tool("crop_region", {"bbox": [20, 0, 10, 20]}, self.context)
@@ -138,7 +139,7 @@ class TestHJLTools(unittest.TestCase):
         result = execute_adapted_tool("compare_with_reference", {}, self.context)
         self.assertFalse(result.success)
         self.assertFalse(result.retriable)
-        self.assertIn("Missing required argument 'reference_path'", result.error or "")
+        self.assertIn("'reference_path'", result.error or "")
 
     def test_compare_with_reference_rejects_self_comparison(self):
         """Comparing the active image against itself must be strictly rejected."""
@@ -176,6 +177,37 @@ class TestHJLTools(unittest.TestCase):
         # Rollback restores initial path
         self.context.rollback(checkpoint)
         self.assertEqual(self.context["current_image_path"], initial_path)
+
+    def test_schema_validation_rejection_on_invalid_types(self):
+        """JSON Schema validator must reject non-conforming primitive types without execution."""
+        # bbox with string elements instead of integers
+        res1 = execute_adapted_tool("crop_region", {"bbox": ["10", "10", "20", "20"]}, self.context)
+        self.assertFalse(res1.success)
+        self.assertFalse(res1.retriable)
+        self.assertIn("Schema validation error", res1.error or "")
+
+        # scale with string instead of number
+        res2 = execute_adapted_tool("zoom_region", {"scale": "2.0"}, self.context)
+        self.assertFalse(res2.success)
+        self.assertFalse(res2.retriable)
+        self.assertIn("Schema validation error", res2.error or "")
+
+        # use_original with string "false" instead of boolean
+        res3 = execute_adapted_tool("crop_region", {"bbox": [0, 0, 10, 10], "use_original": "false"}, self.context)
+        self.assertFalse(res3.success)
+        self.assertFalse(res3.retriable)
+        self.assertIn("Schema validation error", res3.error or "")
+
+    def test_retriable_error_classification(self):
+        """Timeout and connection errors must be classified as retriable; logical errors as non-retriable."""
+        self.assertTrue(_is_retriable_error("TimeoutError: tool call timed out after 30s"))
+        self.assertTrue(_is_retriable_error("Connection reset by peer"))
+        self.assertTrue(_is_retriable_error("Service temporarily unavailable"))
+
+        self.assertFalse(_is_retriable_error("Missing required argument 'bbox'"))
+        self.assertFalse(_is_retriable_error("Invalid bbox dimensions"))
+        self.assertFalse(_is_retriable_error("Reference image not found at /path"))
+        self.assertFalse(_is_retriable_error(None))
 
 
 if __name__ == "__main__":

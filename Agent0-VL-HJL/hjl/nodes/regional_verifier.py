@@ -1,18 +1,24 @@
 """Checkpoint 2: Regional Verifier node for HJL.
 
-Strictly verifies validity, resolution, sharpness, and alignment of the cropped ROI.
-Does NOT perform defect recognition or anomaly classification.
+Two-stage ROI quality gate:
+Stage 1: Resolution, boundary geometry, and rotation quality check.
+Stage 2: Model-based regional verification when model_caller is provided.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from ..state import HJLState
+from ..model_caller import HJLModelCaller
+from ..state import HJLState, StopReason
 from ..taxonomy import CheckpointJudgment, RegionalStatus
 
 
-def regional_verifier_node(state: HJLState) -> dict[str, Any]:
+def regional_verifier_node(
+    state: HJLState,
+    model_caller: HJLModelCaller | None = None,
+    live_mode: bool = False,
+) -> dict[str, Any]:
     """Verify quality, resolution, and relevance of the current regional tool observation."""
     if not state.observations:
         judgment = CheckpointJudgment(
@@ -25,8 +31,9 @@ def regional_verifier_node(state: HJLState) -> dict[str, Any]:
     latest_obs = state.observations[-1]
     tool_name = latest_obs.get("tool", "")
     metadata = latest_obs.get("metadata", {})
+    inspection_image = latest_obs.get("output_path") or state.image_path
 
-    # Evaluate crop / zoom resolution and boundary validity
+    # Stage 1: Resolution and boundary geometry quality checks
     if tool_name in {"crop_region", "zoom_region"}:
         size = metadata.get("image_size")
         if size and (size[0] < 12 or size[1] < 12):
@@ -56,6 +63,24 @@ def regional_verifier_node(state: HJLState) -> dict[str, Any]:
                 reason=f"Image rotation failed: {metadata['error']}",
             )
             return {"regional_judgment": judgment}
+
+    # Stage 2: Model-based regional verification if model_caller available
+    if model_caller is not None:
+        try:
+            m_res = model_caller.verify_regional(
+                observation=latest_obs,
+                image_path=inspection_image,
+            )
+            if m_res.status == RegionalStatus.FAIL:
+                judgment = CheckpointJudgment(
+                    status=RegionalStatus.FAIL,
+                    judgment_confidence=m_res.judgment_confidence,
+                    reason=m_res.reason,
+                )
+                return {"regional_judgment": judgment}
+        except Exception:
+            if live_mode:
+                return {"stop_reason": StopReason.MODEL_ERROR}
 
     # Pure ROI quality checks passed
     judgment = CheckpointJudgment(

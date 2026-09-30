@@ -42,13 +42,20 @@ def to_canonical_trajectory(state: HJLState) -> CanonicalTrajectory:
         },
     )
 
-    # Initial user message
+    # Initial user message with visual context
+    user_content: list[dict[str, Any]] = [
+        {"type": "input_text", "text": state.instruction},
+    ]
+    if state.image_path:
+        user_content.append({
+            "type": "input_image",
+            "image_url": str(state.image_path),
+        })
+
     trajectory.append({
         "type": "message",
         "role": "user",
-        "content": [
-            {"type": "input_text", "text": state.instruction},
-        ],
+        "content": user_content,
     })
 
     # Faithfully convert observation history into function calls and outputs without label rewriting

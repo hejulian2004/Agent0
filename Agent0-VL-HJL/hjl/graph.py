@@ -49,11 +49,6 @@ class CompiledGraph:
             if current_node not in self.nodes:
                 raise RuntimeError(f"Unknown graph node: {current_node!r}")
 
-            # Hard step budget check across all transitions
-            if state.current_step >= state.max_steps and state.stop_reason is None and current_node != "finalizer":
-                state.stop_reason = StopReason.MAX_STEPS
-                current_node = "finalizer"
-
             node_fn = self.nodes[current_node]
             logger.debug(f"[HJL Graph] Executing node: {current_node} (step {state.current_step})")
 
@@ -216,7 +211,10 @@ def create_hjl_graph(
         ),
     )
     workflow.add_node("tool_executor", lambda s: tool_executor_node(s, context=context))
-    workflow.add_node("regional_verifier", regional_verifier_node)
+    workflow.add_node(
+        "regional_verifier",
+        lambda s: regional_verifier_node(s, model_caller=model_caller, live_mode=live_mode),
+    )
     workflow.add_node(
         "evidence_extractor",
         lambda s: evidence_extractor_node(s, model_caller=model_caller, live_mode=live_mode),

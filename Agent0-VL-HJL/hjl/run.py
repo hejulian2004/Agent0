@@ -60,6 +60,8 @@ def main() -> None:
 
     image_path = args.image
     if not image_path:
+        if not args.mock:
+            parser.error("--image is required for live execution (when not running with --mock).")
         mock_file = _create_mock_image()
         image_path = str(mock_file)
         logging.info(f"Generated test image at: {image_path}")

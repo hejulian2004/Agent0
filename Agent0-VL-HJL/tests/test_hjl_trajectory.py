@@ -70,6 +70,16 @@ class TestHJLTrajectory(unittest.TestCase):
         self.assertEqual(traj.schema_version, SCHEMA_VERSION)
         traj.validate()
 
+        # Check initial user message contains both input_text and input_image
+        user_msg = traj.items[0]
+        self.assertEqual(user_msg["type"], "message")
+        self.assertEqual(user_msg["role"], "user")
+        content_types = [p["type"] for p in user_msg["content"]]
+        self.assertIn("input_text", content_types)
+        self.assertIn("input_image", content_types)
+        img_part = next(p for p in user_msg["content"] if p["type"] == "input_image")
+        self.assertEqual(img_part["image_url"], "/tmp/fake.png")
+
         # Check call-output pairing and faithful tool naming
         calls = [it for it in traj.items if it.get("type") == "function_call"]
         outputs = [it for it in traj.items if it.get("type") == "function_call_output"]
