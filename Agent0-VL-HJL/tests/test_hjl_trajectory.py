@@ -51,8 +51,12 @@ class TestHJLTrajectory(unittest.TestCase):
         state.observations.append({
             "step": 1,
             "tool": "crop_region",
-            "arguments": {"bbox": [0, 0, 30, 30]},
+            "arguments": {"bbox": [0, 0, 30, 30], "use_original": True},
+            "success": True,
+            "output_path": "/tmp/crop.png",
             "metadata": {"image_size": [30, 30]},
+            "error": None,
+            "retriable": False,
         })
         state.evidence_state.supporting_evidence.append(
             EvidenceItem(1, [0, 0, 30, 30], "defect", "Crack visible", EvidenceRelation.SUPPORT, 0.9, "crop_region")
@@ -66,12 +70,47 @@ class TestHJLTrajectory(unittest.TestCase):
         self.assertEqual(traj.schema_version, SCHEMA_VERSION)
         traj.validate()
 
-        # Check call-output pairing
+        # Check call-output pairing and faithful tool naming
         calls = [it for it in traj.items if it.get("type") == "function_call"]
         outputs = [it for it in traj.items if it.get("type") == "function_call_output"]
         self.assertEqual(len(calls), 1)
         self.assertEqual(len(outputs), 1)
         self.assertEqual(calls[0]["call_id"], outputs[0]["call_id"])
+        self.assertEqual(calls[0]["name"], "crop_region")
+        self.assertEqual(calls[0]["arguments"], {"bbox": [0, 0, 30, 30], "use_original": True})
+        self.assertTrue(outputs[0]["output"]["success"])
+
+    def test_to_canonical_trajectory_faithful_failures(self):
+        """Tool failure in observation must NOT be rewritten as success=True in canonical export."""
+        state = HJLState(
+            sample_id="s_canonical_fail",
+            image_path="/tmp/fake.png",
+            stop_reason=StopReason.NO_VALID_ACTION,
+        )
+        state.observations.append({
+            "step": 1,
+            "tool": "retrieve_normal_reference",
+            "arguments": {"category": "metal_casting", "allow_synthetic": False},
+            "success": False,
+            "output_path": None,
+            "metadata": {},
+            "error": "No train-normal reference available in reference corpus",
+            "retriable": False,
+        })
+
+        traj = to_canonical_trajectory(state)
+        traj.validate()
+
+        calls = [it for it in traj.items if it.get("type") == "function_call"]
+        outputs = [it for it in traj.items if it.get("type") == "function_call_output"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["name"], "retrieve_normal_reference")
+        self.assertEqual(calls[0]["arguments"], {"category": "metal_casting", "allow_synthetic": False})
+
+        # Must faithfully record success=False and error
+        self.assertFalse(outputs[0]["output"]["success"])
+        self.assertEqual(outputs[0]["output"]["error"], "No train-normal reference available in reference corpus")
+        self.assertFalse(outputs[0]["output"]["retriable"])
 
 
 if __name__ == "__main__":

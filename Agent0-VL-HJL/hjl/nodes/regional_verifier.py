@@ -37,15 +37,16 @@ def regional_verifier_node(state: HJLState) -> dict[str, Any]:
             )
             return {"regional_judgment": judgment}
 
-        # Check if crop bbox is degenerate
-        bbox = metadata.get("bbox")
-        if bbox and (bbox[2] - bbox[0] < 8 or bbox[3] - bbox[1] < 8):
-            judgment = CheckpointJudgment(
-                status=RegionalStatus.FAIL,
-                judgment_confidence=0.85,
-                reason=f"Cropped bounding box {bbox} is too narrow (<8px) or misses target structure.",
-            )
-            return {"regional_judgment": judgment}
+        # Check if crop bbox is degenerate (applicable to crop_region)
+        if tool_name == "crop_region":
+            bbox = metadata.get("bbox")
+            if bbox and (bbox[2] - bbox[0] < 8 or bbox[3] - bbox[1] < 8):
+                judgment = CheckpointJudgment(
+                    status=RegionalStatus.FAIL,
+                    judgment_confidence=0.85,
+                    reason=f"Cropped bounding box {bbox} is too narrow (<8px) or misses target structure.",
+                )
+                return {"regional_judgment": judgment}
 
     elif tool_name == "rotate_image":
         if "error" in metadata:

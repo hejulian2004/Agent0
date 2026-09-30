@@ -62,7 +62,7 @@ class TestHJLBaselines(unittest.TestCase):
         recorded_images: list[str] = []
 
         class TrackingCaller(MockHJLModelCaller):
-            def react_step(self, history, image_path, enabled_tools):
+            def react_step(self, history, image_path, enabled_tools, *args, **kwargs):
                 recorded_images.append(image_path)
                 if not history:
                     # Step 1: Crop [10, 10, 30, 30]
@@ -103,7 +103,7 @@ class TestHJLBaselines(unittest.TestCase):
     def test_react_verifier_skips_on_max_steps(self):
         """When ReAct reaches max_steps without finishing, verifier_passed must be None without model verification."""
         class InfiniteCaller(MockHJLModelCaller):
-            def react_step(self, history, image_path, enabled_tools):
+            def react_step(self, history, image_path, enabled_tools, *args, **kwargs):
                 return ReactDecisionResult(
                     action=ReactAction.TOOL_CALL,
                     tool_name="rotate_image",

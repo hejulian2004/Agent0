@@ -486,6 +486,105 @@ class TestHJLGraph(unittest.TestCase):
         self.assertEqual(res4["active_region_rotation_deg"], 0.0)
         context.close()
 
+    def test_failure_diagnoser_selects_active_failing_checkpoint(self):
+        """When regional verifier passed but evidence verifier failed, diagnoser must select the failing evidence judgment."""
+        state = HJLState(
+            sample_id="test_diag_failing_ckpt",
+            image_path=self.image_path,
+            regional_judgment=CheckpointJudgment(
+                status=RegionalStatus.PASS,
+                judgment_confidence=0.90,
+                reason="Regional observation is sharp and feature-relevant.",
+            ),
+            evidence_judgment=EvidenceJudgment(
+                status=EvidenceStatus.FAIL,
+                conclusion=EvidenceConclusion.UNRESOLVED,
+                judgment_confidence=0.65,
+                reason="Cannot verify anomaly without comparing against a standard normal template.",
+            ),
+        )
+
+        res = failure_diagnoser_node(state)
+        # Must diagnose MISSING_REFERENCE from the failing evidence judgment, NOT regional PASS
+        self.assertEqual(res["failure_type"], FailureType.MISSING_REFERENCE)
+        self.assertIn(ActionType.RETRIEVE_REFERENCE, res["allowed_actions"])
+
+    def test_zoom_and_reference_roi_dedup_and_unresolved_clearing(self):
+        """Zoom and reference comparisons must retain active_region_original_bbox, clear unresolved regions, and deduplicate."""
+        state = HJLState(
+            sample_id="test_dedup",
+            image_path=self.image_path,
+            active_region_original_bbox=[10, 10, 30, 30],
+            evidence_state=EvidenceState(unresolved_regions=[[10, 10, 30, 30]]),
+        )
+
+        # 1. Simulate reference comparison finding
+        state.observations.append({
+            "step": 1,
+            "tool": "compare_with_reference",
+            "metadata": {"similarity": 0.20, "bbox": [10, 10, 30, 30]},
+        })
+        res1 = evidence_updater_node(state)
+        ev_state = res1["evidence_state"]
+
+        self.assertEqual(len(ev_state.evidence_items), 1)
+        self.assertEqual(ev_state.evidence_items[0].region, [10, 10, 30, 30])
+        # Unresolved region was cleared
+        self.assertEqual(len(ev_state.unresolved_regions), 0)
+        first_score = ev_state.anomaly_score
+        self.assertEqual(first_score, 0.80)
+
+        # 2. Second identical reference comparison on the exact same region
+        state.evidence_state = ev_state
+        state.observations.append({
+            "step": 2,
+            "tool": "compare_with_reference",
+            "metadata": {"similarity": 0.20, "bbox": [10, 10, 30, 30]},
+        })
+        res2 = evidence_updater_node(state)
+        ev_state2 = res2["evidence_state"]
+
+        # Deduplication must prevent stacking duplicate +0.8 evidence
+        self.assertEqual(len(ev_state2.evidence_items), 1)
+        self.assertEqual(ev_state2.anomaly_score, first_score)
+
+    def test_hard_step_budget_enforcement(self):
+        """Hard budget enforcement: current_step >= max_steps immediately halts further tool executions."""
+        state = HJLState(
+            sample_id="test_hard_budget",
+            image_path=self.image_path,
+            current_step=5,
+            max_steps=5,
+            tool_calls=[{"name": "crop_region", "arguments": {"bbox": [0, 0, 10, 10]}}],
+        )
+
+        res = tool_executor_node(state)
+        self.assertEqual(res["stop_reason"], StopReason.MAX_STEPS)
+
+    def test_relocalize_refreshes_hypothesis(self):
+        """Relocalization proposing new candidates must clear stale active_hypothesis and reset hypotheses."""
+        state = HJLState(
+            sample_id="test_relocalize_refresh",
+            image_path=self.image_path,
+            active_hypothesis={"hypothesis_id": "hyp_old", "type": "scratch"},
+            hypotheses=[{"hypothesis_id": "hyp_old"}],
+            observations=[{
+                "step": 1,
+                "tool": "localize_candidate",
+                "metadata": {
+                    "candidate_regions": [
+                        {"bbox": [50, 50, 80, 80], "confidence": 0.85, "label": "new_candidate"}
+                    ]
+                },
+            }],
+        )
+
+        res = candidate_state_updater_node(state)
+        self.assertIsNone(res["active_hypothesis"])
+        self.assertEqual(res["hypotheses"], [])
+        self.assertEqual(res["phase"], HJLPhase.HYPOTHESIS_INSPECTION)
+        self.assertEqual(len(res["candidate_regions"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

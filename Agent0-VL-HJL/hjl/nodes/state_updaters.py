@@ -6,7 +6,7 @@ import copy
 from typing import Any
 
 from ..schemas import RegionalEvidenceFinding
-from ..state import EvidenceRelation, HJLState, StopReason
+from ..state import EvidenceRelation, HJLPhase, HJLState, StopReason
 from ..taxonomy import ActionType
 from ..tools_adapter import validate_reference_metadata
 
@@ -87,6 +87,9 @@ def candidate_state_updater_node(
         return {
             "candidate_regions": candidate_regions,
             "discovery_attempts": discovery_attempts,
+            "active_hypothesis": None,
+            "hypotheses": [],
+            "phase": HJLPhase.HYPOTHESIS_INSPECTION,
         }
 
     # If 0 candidates returned, bound discovery attempts

@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Any
 
 from agent0_protocol.schema import CanonicalTrajectory, new_call_id
-from agent0_protocol.tools import get_tool_registry
 
 from .state import HJLState
+from .tools_adapter import get_hjl_tool_definitions
 
 
 def append_trajectory_step(
@@ -26,8 +26,7 @@ def append_trajectory_step(
 
 def to_canonical_trajectory(state: HJLState) -> CanonicalTrajectory:
     """Convert an HJLState and its observation history to a valid CanonicalTrajectory."""
-    registry = get_tool_registry()
-    tools = registry.definitions()
+    tools = get_hjl_tool_definitions()
 
     trajectory = CanonicalTrajectory(
         trajectory_id=f"traj_hjl_{state.sample_id}",
@@ -52,42 +51,25 @@ def to_canonical_trajectory(state: HJLState) -> CanonicalTrajectory:
         ],
     })
 
-    # Convert observation history into function calls and outputs
+    # Faithfully convert observation history into function calls and outputs without label rewriting
     for i, obs in enumerate(state.observations):
         call_id = f"call_{state.sample_id}_{i+1}"
-        tool_name = obs.get("tool", "crop_region")
-
-        # Map to canonical tool name if adapted
-        canonical_name = tool_name
+        tool_name = str(obs.get("tool", "crop_region"))
         raw_args = copy.deepcopy(obs.get("arguments", {}))
-        call_args = raw_args
 
-        if tool_name == "crop_region":
-            canonical_name = "crop_image"
-            call_args = {"bbox": list(raw_args.get("bbox", [0, 0, 10, 10]))}
-        elif tool_name == "zoom_region":
-            canonical_name = "zoom_image"
-            call_args = {"scale": float(raw_args.get("scale", 2.0))}
-        elif tool_name == "retrieve_normal_reference":
-            canonical_name = "retrieve"
-            call_args = {"query": str(raw_args.get("query") or raw_args.get("category", "normal reference"))}
-        elif tool_name == "rotate_image":
-            canonical_name = "rotate_image"
-            call_args = {"angle": float(raw_args.get("angle", 90.0))}
-        else:
-            if not any(t["name"] == canonical_name for t in tools):
-                canonical_name = "visual_analyzer"
-                call_args = {}
         trajectory.append({
             "type": "function_call",
             "call_id": call_id,
-            "name": canonical_name,
-            "arguments": copy.deepcopy(call_args),
+            "name": tool_name,
+            "arguments": raw_args,
         })
 
         output_data = {
-            "success": True,
-            "metadata": obs.get("metadata", {}),
+            "success": bool(obs.get("success", True)),
+            "output_path": obs.get("output_path"),
+            "metadata": copy.deepcopy(obs.get("metadata", {})),
+            "error": obs.get("error"),
+            "retriable": bool(obs.get("retriable", False)),
         }
         trajectory.append({
             "type": "function_call_output",

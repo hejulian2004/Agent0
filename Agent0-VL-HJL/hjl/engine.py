@@ -101,6 +101,8 @@ class HJLEngine:
                 history=history,
                 image_path=str(current_image),
                 enabled_tools=self.config.enabled_tools,
+                instruction=instruction,
+                category=category,
             )
 
             if decision.action == ReactAction.FINISH:

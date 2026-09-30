@@ -49,6 +49,11 @@ class CompiledGraph:
             if current_node not in self.nodes:
                 raise RuntimeError(f"Unknown graph node: {current_node!r}")
 
+            # Hard step budget check across all transitions
+            if state.current_step >= state.max_steps and state.stop_reason is None and current_node != "finalizer":
+                state.stop_reason = StopReason.MAX_STEPS
+                current_node = "finalizer"
+
             node_fn = self.nodes[current_node]
             logger.debug(f"[HJL Graph] Executing node: {current_node} (step {state.current_step})")
 
@@ -292,7 +297,7 @@ def create_hjl_graph(
     def route_candidate_updater(state: HJLState) -> str:
         if state.stop_reason is not None:
             return "finalizer"
-        if state.candidate_regions and state.active_hypothesis is None:
+        if state.candidate_regions:
             return "hypothesis_generator"
         return "planner"
 

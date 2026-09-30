@@ -47,13 +47,15 @@ def planner_node(
 
         if selected_action == ActionType.RETRIEVE_REFERENCE:
             category = state.category or "industrial_component"
+            ret_args: dict[str, Any] = {
+                "category": category,
+                "allow_synthetic": allow_synthetic,
+            }
+            if reference_corpus_dir:
+                ret_args["corpus_dir"] = reference_corpus_dir
             tool_calls.append({
                 "name": "retrieve_normal_reference",
-                "arguments": {
-                    "category": category,
-                    "corpus_dir": reference_corpus_dir,
-                    "allow_synthetic": allow_synthetic,
-                },
+                "arguments": ret_args,
             })
         elif selected_action == ActionType.CROSS_VALIDATE:
             ref_path = (
@@ -61,18 +63,24 @@ def planner_node(
                 if state.evidence_state.normal_references
                 else None
             )
+            comp_args: dict[str, Any] = {
+                "reference_path": ref_path,
+                "normalized_bbox": state.active_region_normalized_bbox,
+                "rotation_deg": state.active_region_rotation_deg,
+            }
+            if state.active_region_original_bbox:
+                comp_args["bbox"] = list(state.active_region_original_bbox)
             tool_calls.append({
                 "name": "compare_with_reference",
-                "arguments": {
-                    "reference_path": ref_path,
-                    "normalized_bbox": state.active_region_normalized_bbox,
-                    "rotation_deg": state.active_region_rotation_deg,
-                } if ref_path else {},
+                "arguments": comp_args if ref_path else {},
             })
         elif selected_action == ActionType.ENHANCE_REGION:
+            zoom_args: dict[str, Any] = {"scale": 2.0}
+            if state.active_region_original_bbox:
+                zoom_args["bbox"] = list(state.active_region_original_bbox)
             tool_calls.append({
                 "name": "zoom_region",
-                "arguments": {"scale": 2.0},
+                "arguments": zoom_args,
             })
         elif selected_action == ActionType.INSPECT_NEXT_REGION:
             next_bbox = (
@@ -123,9 +131,12 @@ def planner_node(
         if selected_action == ActionType.ENHANCE_REGION:
             # If region was already cropped, zoom; else crop from original image
             if state.observations and any(o.get("tool") == "crop_region" for o in state.observations):
+                zoom_args: dict[str, Any] = {"scale": 2.0}
+                if state.active_region_original_bbox:
+                    zoom_args["bbox"] = list(state.active_region_original_bbox)
                 tool_calls.append({
                     "name": "zoom_region",
-                    "arguments": {"scale": 2.0},
+                    "arguments": zoom_args,
                 })
             else:
                 tool_calls.append({
@@ -138,22 +149,27 @@ def planner_node(
                 if state.evidence_state.normal_references
                 else None
             )
+            comp_args: dict[str, Any] = {
+                "reference_path": ref_path,
+                "normalized_bbox": state.active_region_normalized_bbox,
+                "rotation_deg": state.active_region_rotation_deg,
+            }
+            if state.active_region_original_bbox:
+                comp_args["bbox"] = list(state.active_region_original_bbox)
             tool_calls.append({
                 "name": "compare_with_reference",
-                "arguments": {
-                    "reference_path": ref_path,
-                    "normalized_bbox": state.active_region_normalized_bbox,
-                    "rotation_deg": state.active_region_rotation_deg,
-                } if ref_path else {},
+                "arguments": comp_args if ref_path else {},
             })
         elif selected_action == ActionType.RETRIEVE_REFERENCE:
+            ret_args2: dict[str, Any] = {
+                "category": state.category or "industrial_component",
+                "allow_synthetic": allow_synthetic,
+            }
+            if reference_corpus_dir:
+                ret_args2["corpus_dir"] = reference_corpus_dir
             tool_calls.append({
                 "name": "retrieve_normal_reference",
-                "arguments": {
-                    "category": state.category or "industrial_component",
-                    "corpus_dir": reference_corpus_dir,
-                    "allow_synthetic": allow_synthetic,
-                },
+                "arguments": ret_args2,
             })
         elif selected_action == ActionType.RELOCALIZE:
             tool_calls.append({

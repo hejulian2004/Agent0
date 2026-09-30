@@ -127,6 +127,8 @@ class HJLModelCaller(Protocol):
         history: list[dict[str, Any]],
         image_path: str,
         enabled_tools: list[str],
+        instruction: str = "Inspect this component for defects using tools.",
+        category: str = "industrial_component",
     ) -> ReactDecisionResult: ...
 
     def generic_verify_react(
@@ -255,9 +257,11 @@ class ResponsesHJLModelCaller:
                 if not isinstance(c, dict):
                     raise ValueError(f"candidate item must be a dict, got {type(c).__name__}")
                 bbox = require_list(c, "bbox")
+                if len(bbox) != 4 or not all(type(v) is int for v in bbox):
+                    raise ValueError(f"candidate bbox must be a list of 4 integers, got {bbox}")
                 c_conf = require_float(c, "confidence", 0.0, 1.0)
                 label = c.get("label")
-                candidates.append(CandidateRegion(bbox=[int(v) for v in bbox], confidence=c_conf, label=label))
+                candidates.append(CandidateRegion(bbox=bbox, confidence=c_conf, label=label))
 
             return GlobalInspectionResult(
                 observation=obs,
@@ -382,10 +386,32 @@ class ResponsesHJLModelCaller:
         observation: dict[str, Any] | None,
         evidence_state: EvidenceState,
     ) -> FailureDiagnosisResult:
+        ev_summary = {
+            "anomaly_score": evidence_state.anomaly_score,
+            "supporting_count": len(evidence_state.supporting_evidence),
+            "contradicting_count": len(evidence_state.contradicting_evidence),
+            "unresolved_regions_count": len(evidence_state.unresolved_regions),
+            "normal_references_count": len(evidence_state.normal_references),
+        }
+        latest_obs_summary = {
+            "tool": observation.get("tool") if observation else None,
+            "success": observation.get("success") if observation else None,
+            "metadata": observation.get("metadata") if observation else {},
+            "error": observation.get("error") if observation else None,
+        }
         prompt = (
-            f"Inspection checkpoint failed with reason: {getattr(verifier_judgment, 'reason', '')}.\n"
-            "Classify root cause strictly into one of: WRONG_REGION, LOW_RESOLUTION, MISSING_REFERENCE, "
-            "VIEWPOINT_MISMATCH, CONTRADICTORY_EVIDENCE, LOCALIZATION_UNCERTAIN, PREMATURE_CONCLUSION.\n"
+            f"Inspection checkpoint failed.\n"
+            f"Checkpoint reason: {getattr(verifier_judgment, 'reason', '')}\n"
+            f"Latest observation: {json.dumps(latest_obs_summary, ensure_ascii=False)}\n"
+            f"Evidence state: {json.dumps(ev_summary, ensure_ascii=False)}\n"
+            "Classify root cause strictly into one of:\n"
+            "- WRONG_REGION\n"
+            "- LOW_RESOLUTION\n"
+            "- MISSING_REFERENCE\n"
+            "- VIEWPOINT_MISMATCH\n"
+            "- CONTRADICTORY_EVIDENCE\n"
+            "- LOCALIZATION_UNCERTAIN\n"
+            "- PREMATURE_CONCLUSION\n"
             "Return JSON: failure_type, cause, diagnosis_confidence (0.0-1.0)."
         )
 
@@ -431,10 +457,16 @@ class ResponsesHJLModelCaller:
         return self._call_and_validate(prompt, image_path, _validate)
 
     def react_step(
-        self, history: list[dict[str, Any]], image_path: str, enabled_tools: list[str]
+        self,
+        history: list[dict[str, Any]],
+        image_path: str,
+        enabled_tools: list[str],
+        instruction: str = "Inspect this component for defects using tools.",
+        category: str = "industrial_component",
     ) -> ReactDecisionResult:
         prompt = (
-            f"You are a ReAct agent inspecting an industrial component.\n"
+            f"You are a ReAct agent inspecting a {category} component.\n"
+            f"Instruction: {instruction}\n"
             f"Enabled tools: {enabled_tools}\n"
             f"History: {json.dumps(history[-4:] if history else [])}\n"
             "Decide next step. Return JSON with:\n"
@@ -668,7 +700,12 @@ class MockHJLModelCaller:
         )
 
     def react_step(
-        self, history: list[dict[str, Any]], image_path: str, enabled_tools: list[str]
+        self,
+        history: list[dict[str, Any]],
+        image_path: str,
+        enabled_tools: list[str],
+        instruction: str = "Inspect this component for defects using tools.",
+        category: str = "industrial_component",
     ) -> ReactDecisionResult:
         self.call_history.append("react_step")
         if not history:
@@ -792,12 +829,17 @@ class ScriptedHJLModelCaller:
         return MockHJLModelCaller().direct_inspect(image_path, instruction, category)
 
     def react_step(
-        self, history: list[dict[str, Any]], image_path: str, enabled_tools: list[str]
+        self,
+        history: list[dict[str, Any]],
+        image_path: str,
+        enabled_tools: list[str],
+        instruction: str = "Inspect this component for defects using tools.",
+        category: str = "industrial_component",
     ) -> ReactDecisionResult:
         self.call_history.append("react_step")
         if self.scripted_react:
             return self.scripted_react
-        return MockHJLModelCaller().react_step(history, image_path, enabled_tools)
+        return MockHJLModelCaller().react_step(history, image_path, enabled_tools, instruction, category)
 
     def generic_verify_react(
         self,

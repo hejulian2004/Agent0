@@ -16,6 +16,7 @@ from ..taxonomy import (
     EvidenceStatus,
     FailureDiagnosis,
     FailureType,
+    GlobalStatus,
     RegionalStatus,
 )
 
@@ -85,7 +86,15 @@ class VLMFailureDiagnoser:
         state: HJLState,
         model_caller: HJLModelCaller,
     ) -> FailureDiagnosisResult:
-        verifier_judgment = state.regional_judgment or state.evidence_judgment
+        if state.evidence_judgment is not None and state.evidence_judgment.status == EvidenceStatus.FAIL:
+            verifier_judgment = state.evidence_judgment
+        elif state.regional_judgment is not None and state.regional_judgment.status == RegionalStatus.FAIL:
+            verifier_judgment = state.regional_judgment
+        elif state.global_judgment is not None and state.global_judgment.status == GlobalStatus.FAIL:
+            verifier_judgment = state.global_judgment
+        else:
+            verifier_judgment = state.evidence_judgment or state.regional_judgment or state.global_judgment
+
         observation = state.observations[-1] if state.observations else None
         return model_caller.diagnose_failure(
             verifier_judgment=verifier_judgment,

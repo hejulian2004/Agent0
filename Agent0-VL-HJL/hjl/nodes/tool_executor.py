@@ -19,6 +19,9 @@ def tool_executor_node(
     context: ToolExecutionContext | None = None,
 ) -> dict[str, Any]:
     """Execute the planned tool call and handle execution success or failure."""
+    if state.current_step >= state.max_steps:
+        return {"stop_reason": StopReason.MAX_STEPS}
+
     tool_calls = state.tool_calls
     if not tool_calls:
         return {}

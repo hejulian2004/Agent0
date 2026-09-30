@@ -53,7 +53,12 @@ def evidence_updater_node(
     tool_name = latest_obs.get("tool", "")
     metadata = latest_obs.get("metadata", {})
     step = latest_obs.get("step", state.current_step)
-    region = metadata.get("bbox")
+    region = (
+        metadata.get("bbox")
+        or (finding.metadata.get("bbox") if finding and finding.metadata else None)
+        or (state.extracted_finding.metadata.get("bbox") if getattr(state, "extracted_finding", None) and state.extracted_finding.metadata else None)
+        or state.active_region_original_bbox
+    )
 
     # 1. Determine finding attributes
     if finding is not None:
@@ -101,14 +106,17 @@ def evidence_updater_node(
     )
 
     # 2. Refined deduplication:
-    # Flag duplicate only if IoU > 0.7 AND same tool AND same observation_type
+    # Flag duplicate only if same tool AND same observation_type AND matching region
     is_duplicate = False
     for existing in evidence_state.evidence_items:
-        if (
-            existing.source_tool == new_item.source_tool
-            and existing.observation_type == new_item.observation_type
-            and _compute_iou(existing.region, new_item.region) > 0.7
-        ):
+        same_tool = (existing.source_tool == new_item.source_tool)
+        same_type = (existing.observation_type == new_item.observation_type)
+        same_region = (
+            (_compute_iou(existing.region, new_item.region) > 0.7)
+            if (existing.region and new_item.region)
+            else (existing.region == new_item.region)
+        )
+        if same_tool and same_type and same_region:
             is_duplicate = True
             break
 
@@ -123,8 +131,9 @@ def evidence_updater_node(
             evidence_state.neutral_evidence.append(new_item)
 
     # 3. Update inspected regions and unresolved regions
-    if region and region not in evidence_state.inspected_regions:
-        evidence_state.inspected_regions.append(region)
+    if region:
+        if region not in evidence_state.inspected_regions:
+            evidence_state.inspected_regions.append(region)
         evidence_state.unresolved_regions = [
             r for r in evidence_state.unresolved_regions
             if _compute_iou(r, region) < 0.7

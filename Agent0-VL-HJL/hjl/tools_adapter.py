@@ -20,6 +20,148 @@ from agent0_protocol.tools import (
     get_tool_registry,
 )
 
+HJL_TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "name": "crop_region",
+        "description": "Crop a specific region of interest using [x1, y1, x2, y2] bounding box coordinates.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "bbox": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Bounding box coordinates [x1, y1, x2, y2]",
+                },
+                "use_original": {
+                    "type": "boolean",
+                    "description": "Whether to crop from the original full image rather than current crop",
+                },
+            },
+            "required": ["bbox"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "zoom_region",
+        "description": "Resize and magnify the current inspection region by a positive scale factor.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "scale": {
+                    "type": "number",
+                    "description": "Scale magnification factor (> 0.0)",
+                },
+                "bbox": {
+                    "type": ["array", "null"],
+                    "items": {"type": "integer"},
+                    "description": "Associated original region bounding box",
+                },
+            },
+            "required": ["scale"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "rotate_image",
+        "description": "Rotate the current visual inspection region by a specified angle in degrees.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "angle": {
+                    "type": "number",
+                    "description": "Rotation angle in degrees",
+                },
+            },
+            "required": ["angle"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "retrieve_normal_reference",
+        "description": "Retrieve a verified defect-free normal training reference image for the product category.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "description": "Product category name",
+                },
+                "corpus_dir": {
+                    "type": ["string", "null"],
+                    "description": "Optional path to reference image corpus",
+                },
+                "allow_synthetic": {
+                    "type": "boolean",
+                    "description": "Whether synthetic template references are permitted (offline/mock only)",
+                },
+            },
+            "required": ["category"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "compare_with_reference",
+        "description": "Compare the current local inspection region against a normal reference template.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reference_path": {
+                    "type": "string",
+                    "description": "Filesystem path to the normal reference image",
+                },
+                "normalized_bbox": {
+                    "type": ["array", "null"],
+                    "items": {"type": "number"},
+                    "description": "Normalized bounding box [nx1, ny1, nx2, ny2] in [0, 1] range",
+                },
+                "rotation_deg": {
+                    "type": "number",
+                    "description": "Rotation angle applied to the test ROI in degrees",
+                },
+                "bbox": {
+                    "type": ["array", "null"],
+                    "items": {"type": "integer"},
+                    "description": "Associated original region bounding box",
+                },
+            },
+            "required": ["reference_path"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "localize_candidate",
+        "description": "Scan and propose suspicious defect candidate bounding box regions on the full image.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "use_original": {
+                    "type": "boolean",
+                    "description": "Whether to perform localization against original uncropped image",
+                },
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+]
+
+
+def get_hjl_tool_definitions() -> list[dict[str, Any]]:
+    """Return JSON schemas for all canonical HJL visual tools."""
+    return copy.deepcopy(HJL_TOOL_DEFINITIONS)
+
 
 @dataclass
 class ToolResult:
@@ -195,14 +337,27 @@ def execute_adapted_tool(
                     retriable=False,
                 )
             bbox = arguments["bbox"]
-            if not isinstance(bbox, list) or len(bbox) != 4 or bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
+            if not isinstance(bbox, list) or len(bbox) != 4 or not all(type(v) is int for v in bbox):
                 return ToolResult(
                     success=False,
-                    error=f"Invalid bbox dimensions: {bbox}",
+                    error=f"bbox must be a list of 4 integers, got {bbox}",
+                    retriable=False,
+                )
+            if bbox[0] >= bbox[2] or bbox[1] >= bbox[3] or bbox[0] < 0 or bbox[1] < 0:
+                return ToolResult(
+                    success=False,
+                    error=f"Invalid bbox dimensions [x1,y1,x2,y2]: {bbox}",
                     retriable=False,
                 )
 
+            if "use_original" in arguments and type(arguments["use_original"]) is not bool:
+                return ToolResult(
+                    success=False,
+                    error="use_original must be a boolean",
+                    retriable=False,
+                )
             use_original = bool(arguments.get("use_original", False))
+
             work_context = context.fork()
             if use_original and "original_image_path" in context:
                 work_context["current_image_path"] = context["original_image_path"]
@@ -231,16 +386,14 @@ def execute_adapted_tool(
                     error="Missing required argument 'scale' for zoom_region.",
                     retriable=False,
                 )
-            try:
-                scale = float(arguments["scale"])
-                if scale <= 0:
-                    raise ValueError("scale must be positive")
-            except (ValueError, TypeError) as exc:
+            scale = arguments["scale"]
+            if type(scale) is bool or not isinstance(scale, (int, float)) or scale <= 0:
                 return ToolResult(
                     success=False,
-                    error=f"Invalid scale for zoom_region: {exc}",
+                    error=f"scale must be a positive number, got {scale!r}",
                     retriable=False,
                 )
+            scale = float(scale)
 
             call = {
                 "type": "function_call",
@@ -251,10 +404,13 @@ def execute_adapted_tool(
             output = reg.execute(call, context)
             if output.get("success"):
                 path = str(_current_image_path(context))
+                meta: dict[str, Any] = {"image_size": output.get("image_size"), "scale": scale}
+                if "bbox" in arguments and isinstance(arguments["bbox"], list):
+                    meta["bbox"] = list(arguments["bbox"])
                 return ToolResult(
                     success=True,
                     output_path=path,
-                    metadata={"image_size": output.get("image_size"), "scale": scale},
+                    metadata=meta,
                 )
             return ToolResult(success=False, error=output.get("error", "zoom_image failed"), retriable=False)
 
@@ -265,14 +421,14 @@ def execute_adapted_tool(
                     error="Missing required argument 'angle' for rotate_image.",
                     retriable=False,
                 )
-            try:
-                angle = float(arguments["angle"])
-            except (ValueError, TypeError) as exc:
+            angle = arguments["angle"]
+            if type(angle) is bool or not isinstance(angle, (int, float)):
                 return ToolResult(
                     success=False,
-                    error=f"Invalid angle for rotate_image: {exc}",
+                    error=f"angle must be a number, got {angle!r}",
                     retriable=False,
                 )
+            angle = float(angle)
 
             call = {
                 "type": "function_call",
@@ -291,9 +447,23 @@ def execute_adapted_tool(
             return ToolResult(success=False, error=output.get("error", "rotate_image failed"), retriable=False)
 
         elif name == "retrieve_normal_reference":
-            category = str(arguments.get("category", "industrial_component"))
+            if "category" not in arguments:
+                return ToolResult(
+                    success=False,
+                    error="Missing required argument 'category' for retrieve_normal_reference.",
+                    retriable=False,
+                )
+            category = str(arguments["category"])
             corpus_dir = arguments.get("corpus_dir")
+
+            if "allow_synthetic" in arguments and type(arguments["allow_synthetic"]) is not bool:
+                return ToolResult(
+                    success=False,
+                    error="allow_synthetic must be a boolean",
+                    retriable=False,
+                )
             allow_synthetic = bool(arguments.get("allow_synthetic", False))
+
             try:
                 ref_path, meta = _locate_or_create_reference_image(
                     category=category,
@@ -316,7 +486,7 @@ def execute_adapted_tool(
             ref_path_str = arguments.get("reference_path")
             current_path = _current_image_path(context)
 
-            if not ref_path_str:
+            if not ref_path_str or not isinstance(ref_path_str, str):
                 return ToolResult(
                     success=False,
                     error="Missing required argument 'reference_path' for compare_with_reference.",
@@ -340,6 +510,18 @@ def execute_adapted_tool(
                 )
 
             normalized_bbox = arguments.get("normalized_bbox")
+            if normalized_bbox is not None:
+                if (
+                    not isinstance(normalized_bbox, list)
+                    or len(normalized_bbox) != 4
+                    or not all(isinstance(v, (int, float)) and type(v) is not bool for v in normalized_bbox)
+                ):
+                    return ToolResult(
+                        success=False,
+                        error="normalized_bbox must be a list of 4 numbers",
+                        retriable=False,
+                    )
+
             rotation_deg = float(arguments.get("rotation_deg", 0.0))
 
             diff_meta = _compare_images_simple(
@@ -350,6 +532,9 @@ def execute_adapted_tool(
             )
             if "error" in diff_meta:
                 return ToolResult(success=False, error=diff_meta["error"], retriable=False)
+
+            if "bbox" in arguments and isinstance(arguments["bbox"], list):
+                diff_meta["bbox"] = list(arguments["bbox"])
 
             return ToolResult(
                 success=True,
@@ -386,4 +571,9 @@ def execute_adapted_tool(
             return ToolResult(success=False, error=f"Unknown tool: {name}", retriable=False)
 
     except Exception as exc:
-        return ToolResult(success=False, error=f"{type(exc).__name__}: {exc}", retriable=False)
+        is_timeout = (
+            isinstance(exc, (TimeoutError, ConnectionError))
+            or "timeout" in str(exc).lower()
+            or "timed out" in str(exc).lower()
+        )
+        return ToolResult(success=False, error=f"{type(exc).__name__}: {exc}", retriable=is_timeout)
