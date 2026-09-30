@@ -436,14 +436,20 @@ def execute_adapted_tool(
             use_original = bool(arguments.get("use_original", False))
 
             work_context = context.fork()
-            if use_original and "original_image_path" in context:
+            if "image_path" in arguments and arguments["image_path"]:
+                work_context["current_image_path"] = arguments["image_path"]
+            elif use_original and "original_image_path" in context:
                 work_context["current_image_path"] = context["original_image_path"]
+
+            crop_args: dict[str, Any] = {"bbox": bbox}
+            if "image_path" in arguments:
+                crop_args["image_path"] = arguments["image_path"]
 
             call = {
                 "type": "function_call",
                 "call_id": new_call_id(),
                 "name": "crop_image",
-                "arguments": {"bbox": bbox},
+                "arguments": crop_args,
             }
             output = reg.execute(call, work_context)
             if output.get("success"):
@@ -452,7 +458,7 @@ def execute_adapted_tool(
                 return ToolResult(
                     success=True,
                     output_path=path,
-                    metadata={"image_size": output.get("image_size"), "bbox": bbox},
+                    metadata={"image_size": output.get("image_size"), "bbox": bbox, "image_path": path},
                 )
             err = output.get("error", "crop_image failed")
             return ToolResult(success=False, error=err, retriable=_is_retriable_error(err))
@@ -473,16 +479,20 @@ def execute_adapted_tool(
                 )
             scale = float(scale)
 
+            zoom_args: dict[str, Any] = {"scale": scale}
+            if "image_path" in arguments:
+                zoom_args["image_path"] = arguments["image_path"]
+
             call = {
                 "type": "function_call",
                 "call_id": new_call_id(),
                 "name": "zoom_image",
-                "arguments": {"scale": scale},
+                "arguments": zoom_args,
             }
             output = reg.execute(call, context)
             if output.get("success"):
                 path = str(_current_image_path(context))
-                meta: dict[str, Any] = {"image_size": output.get("image_size"), "scale": scale}
+                meta: dict[str, Any] = {"image_size": output.get("image_size"), "scale": scale, "image_path": path}
                 if "bbox" in arguments and isinstance(arguments["bbox"], list):
                     meta["bbox"] = list(arguments["bbox"])
                 return ToolResult(
@@ -509,11 +519,15 @@ def execute_adapted_tool(
                 )
             angle = float(angle)
 
+            rot_args: dict[str, Any] = {"angle": angle}
+            if "image_path" in arguments:
+                rot_args["image_path"] = arguments["image_path"]
+
             call = {
                 "type": "function_call",
                 "call_id": new_call_id(),
                 "name": "rotate_image",
-                "arguments": {"angle": angle},
+                "arguments": rot_args,
             }
             output = reg.execute(call, context)
             if output.get("success"):
@@ -521,7 +535,7 @@ def execute_adapted_tool(
                 return ToolResult(
                     success=True,
                     output_path=path,
-                    metadata={"image_size": output.get("image_size"), "angle": angle},
+                    metadata={"image_size": output.get("image_size"), "angle": angle, "image_path": path},
                 )
             err = output.get("error", "rotate_image failed")
             return ToolResult(success=False, error=err, retriable=_is_retriable_error(err))
