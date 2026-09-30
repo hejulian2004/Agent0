@@ -433,8 +433,8 @@ hjl:
     - crop_region
     - zoom_region
     - rotate_image
-    - retrieve_normal_reference
-    - compare_with_reference
+    # - retrieve_normal_reference  # (针对工业异常检测的工具 - 暂时注释)
+    # - compare_with_reference     # (针对工业异常检测的工具 - 暂时注释)
     - localize_candidate
   trajectory_output_dir: outputs/hjl_trajectories
 

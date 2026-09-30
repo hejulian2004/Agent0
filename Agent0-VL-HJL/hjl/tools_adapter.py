@@ -82,62 +82,63 @@ HJL_TOOL_DEFINITIONS = [
         },
         "strict": True,
     },
-    {
-        "type": "function",
-        "name": "retrieve_normal_reference",
-        "description": "Retrieve a verified defect-free normal training reference image for the product category.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "category": {
-                    "type": "string",
-                    "description": "Product category name",
-                },
-                "corpus_dir": {
-                    "type": ["string", "null"],
-                    "description": "Optional path to reference image corpus",
-                },
-                "allow_synthetic": {
-                    "type": "boolean",
-                    "description": "Whether synthetic template references are permitted (offline/mock only)",
-                },
-            },
-            "required": ["category"],
-            "additionalProperties": False,
-        },
-        "strict": True,
-    },
-    {
-        "type": "function",
-        "name": "compare_with_reference",
-        "description": "Compare the current local inspection region against a normal reference template.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "reference_path": {
-                    "type": "string",
-                    "description": "Filesystem path to the normal reference image",
-                },
-                "normalized_bbox": {
-                    "type": ["array", "null"],
-                    "items": {"type": "number"},
-                    "description": "Normalized bounding box [nx1, ny1, nx2, ny2] in [0, 1] range",
-                },
-                "rotation_deg": {
-                    "type": "number",
-                    "description": "Rotation angle applied to the test ROI in degrees",
-                },
-                "bbox": {
-                    "type": ["array", "null"],
-                    "items": {"type": "integer"},
-                    "description": "Associated original region bounding box",
-                },
-            },
-            "required": ["reference_path"],
-            "additionalProperties": False,
-        },
-        "strict": True,
-    },
+    # --- Industrial Anomaly Detection Tools (Commented out for general Agent0-VL) ---
+    # {
+    #     "type": "function",
+    #     "name": "retrieve_normal_reference",
+    #     "description": "Retrieve a verified defect-free normal training reference image for the product category.",
+    #     "parameters": {
+    #         "type": "object",
+    #         "properties": {
+    #             "category": {
+    #                 "type": "string",
+    #                 "description": "Product category name",
+    #             },
+    #             "corpus_dir": {
+    #                 "type": ["string", "null"],
+    #                 "description": "Optional path to reference image corpus",
+    #             },
+    #             "allow_synthetic": {
+    #                 "type": "boolean",
+    #                 "description": "Whether synthetic template references are permitted (offline/mock only)",
+    #             },
+    #         },
+    #         "required": ["category"],
+    #         "additionalProperties": False,
+    #     },
+    #     "strict": True,
+    # },
+    # {
+    #     "type": "function",
+    #     "name": "compare_with_reference",
+    #     "description": "Compare the current local inspection region against a normal reference template.",
+    #     "parameters": {
+    #         "type": "object",
+    #         "properties": {
+    #             "reference_path": {
+    #                 "type": "string",
+    #                 "description": "Filesystem path to the normal reference image",
+    #             },
+    #             "normalized_bbox": {
+    #                 "type": ["array", "null"],
+    #                 "items": {"type": "number"},
+    #                 "description": "Normalized bounding box [nx1, ny1, nx2, ny2] in [0, 1] range",
+    #             },
+    #             "rotation_deg": {
+    #                 "type": "number",
+    #                 "description": "Rotation angle applied to the test ROI in degrees",
+    #             },
+    #             "bbox": {
+    #                 "type": ["array", "null"],
+    #                 "items": {"type": "integer"},
+    #                 "description": "Associated original region bounding box",
+    #             },
+    #         },
+    #         "required": ["reference_path"],
+    #         "additionalProperties": False,
+    #     },
+    #     "strict": True,
+    # },
     {
         "type": "function",
         "name": "localize_candidate",
@@ -499,101 +500,102 @@ def execute_adapted_tool(
             err = output.get("error", "rotate_image failed")
             return ToolResult(success=False, error=err, retriable=_is_retriable_error(err))
 
-        elif name == "retrieve_normal_reference":
-            if "category" not in arguments:
-                return ToolResult(
-                    success=False,
-                    error="Missing required argument 'category' for retrieve_normal_reference.",
-                    retriable=False,
-                )
-            category = str(arguments["category"])
-            corpus_dir = arguments.get("corpus_dir")
-
-            if "allow_synthetic" in arguments and type(arguments["allow_synthetic"]) is not bool:
-                return ToolResult(
-                    success=False,
-                    error="allow_synthetic must be a boolean",
-                    retriable=False,
-                )
-            allow_synthetic = bool(arguments.get("allow_synthetic", False))
-
-            try:
-                ref_path, meta = _locate_or_create_reference_image(
-                    category=category,
-                    corpus_dir=corpus_dir,
-                    allow_synthetic=allow_synthetic,
-                )
-                return ToolResult(
-                    success=True,
-                    output_path=str(ref_path),
-                    metadata=meta,
-                )
-            except Exception as exc:
-                return ToolResult(
-                    success=False,
-                    error=f"No train-normal reference available in reference corpus: {exc}",
-                    retriable=False,
-                )
-
-        elif name == "compare_with_reference":
-            ref_path_str = arguments.get("reference_path")
-            current_path = _current_image_path(context)
-
-            if not ref_path_str or not isinstance(ref_path_str, str):
-                return ToolResult(
-                    success=False,
-                    error="Missing required argument 'reference_path' for compare_with_reference.",
-                    retriable=False,
-                )
-
-            ref_path = Path(ref_path_str)
-            if not ref_path.is_file():
-                return ToolResult(
-                    success=False,
-                    error=f"Reference image not found at: {ref_path_str}",
-                    retriable=False,
-                )
-
-            # Strictly reject comparing active image against itself
-            if ref_path.resolve() == current_path.resolve():
-                return ToolResult(
-                    success=False,
-                    error="Self-comparison rejected: reference image cannot be the current active inspection image.",
-                    retriable=False,
-                )
-
-            normalized_bbox = arguments.get("normalized_bbox")
-            if normalized_bbox is not None:
-                if (
-                    not isinstance(normalized_bbox, list)
-                    or len(normalized_bbox) != 4
-                    or not all(isinstance(v, (int, float)) and type(v) is not bool for v in normalized_bbox)
-                ):
-                    return ToolResult(
-                        success=False,
-                        error="normalized_bbox must be a list of 4 numbers",
-                        retriable=False,
-                    )
-
-            rotation_deg = float(arguments.get("rotation_deg", 0.0))
-
-            diff_meta = _compare_images_simple(
-                current_path,
-                ref_path,
-                normalized_bbox=normalized_bbox,
-                rotation_deg=rotation_deg,
-            )
-            if "error" in diff_meta:
-                return ToolResult(success=False, error=diff_meta["error"], retriable=False)
-
-            if "bbox" in arguments and isinstance(arguments["bbox"], list):
-                diff_meta["bbox"] = list(arguments["bbox"])
-
-            return ToolResult(
-                success=True,
-                output_path=str(current_path),
-                metadata=diff_meta,
-            )
+        # --- Industrial Anomaly Detection Tools (Commented out for general Agent0-VL) ---
+        # elif name == "retrieve_normal_reference":
+        #     if "category" not in arguments:
+        #         return ToolResult(
+        #             success=False,
+        #             error="Missing required argument 'category' for retrieve_normal_reference.",
+        #             retriable=False,
+        #         )
+        #     category = str(arguments["category"])
+        #     corpus_dir = arguments.get("corpus_dir")
+        #
+        #     if "allow_synthetic" in arguments and type(arguments["allow_synthetic"]) is not bool:
+        #         return ToolResult(
+        #             success=False,
+        #             error="allow_synthetic must be a boolean",
+        #             retriable=False,
+        #         )
+        #     allow_synthetic = bool(arguments.get("allow_synthetic", False))
+        #
+        #     try:
+        #         ref_path, meta = _locate_or_create_reference_image(
+        #             category=category,
+        #             corpus_dir=corpus_dir,
+        #             allow_synthetic=allow_synthetic,
+        #         )
+        #         return ToolResult(
+        #             success=True,
+        #             output_path=str(ref_path),
+        #             metadata=meta,
+        #         )
+        #     except Exception as exc:
+        #         return ToolResult(
+        #             success=False,
+        #             error=f"No train-normal reference available in reference corpus: {exc}",
+        #             retriable=False,
+        #         )
+        #
+        # elif name == "compare_with_reference":
+        #     ref_path_str = arguments.get("reference_path")
+        #     current_path = _current_image_path(context)
+        #
+        #     if not ref_path_str or not isinstance(ref_path_str, str):
+        #         return ToolResult(
+        #             success=False,
+        #             error="Missing required argument 'reference_path' for compare_with_reference.",
+        #             retriable=False,
+        #         )
+        #
+        #     ref_path = Path(ref_path_str)
+        #     if not ref_path.is_file():
+        #         return ToolResult(
+        #             success=False,
+        #             error=f"Reference image not found at: {ref_path_str}",
+        #             retriable=False,
+        #         )
+        #
+        #     # Strictly reject comparing active image against itself
+        #     if ref_path.resolve() == current_path.resolve():
+        #         return ToolResult(
+        #             success=False,
+        #             error="Self-comparison rejected: reference image cannot be the current active inspection image.",
+        #             retriable=False,
+        #         )
+        #
+        #     normalized_bbox = arguments.get("normalized_bbox")
+        #     if normalized_bbox is not None:
+        #         if (
+        #             not isinstance(normalized_bbox, list)
+        #             or len(normalized_bbox) != 4
+        #             or not all(isinstance(v, (int, float)) and type(v) is not bool for v in normalized_bbox)
+        #         ):
+        #             return ToolResult(
+        #                 success=False,
+        #                 error="normalized_bbox must be a list of 4 numbers",
+        #                 retriable=False,
+        #             )
+        #
+        #     rotation_deg = float(arguments.get("rotation_deg", 0.0))
+        #
+        #     diff_meta = _compare_images_simple(
+        #         current_path,
+        #         ref_path,
+        #         normalized_bbox=normalized_bbox,
+        #         rotation_deg=rotation_deg,
+        #     )
+        #     if "error" in diff_meta:
+        #         return ToolResult(success=False, error=diff_meta["error"], retriable=False)
+        #
+        #     if "bbox" in arguments and isinstance(arguments["bbox"], list):
+        #         diff_meta["bbox"] = list(arguments["bbox"])
+        #
+        #     return ToolResult(
+        #         success=True,
+        #         output_path=str(current_path),
+        #         metadata=diff_meta,
+        #     )
 
         elif name == "localize_candidate":
             analysis_context = context.fork()

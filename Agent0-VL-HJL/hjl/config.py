@@ -36,8 +36,8 @@ class HJLConfig:
             "crop_region",
             "zoom_region",
             "rotate_image",
-            "retrieve_normal_reference",
-            "compare_with_reference",
+            # "retrieve_normal_reference",
+            # "compare_with_reference",
             "localize_candidate",
         ]
     )

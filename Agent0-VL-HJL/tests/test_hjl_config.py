@@ -21,7 +21,7 @@ class TestHJLConfig(unittest.TestCase):
         self.assertEqual(config.reference_similarity_threshold, 0.80)
         self.assertEqual(config.max_discovery_attempts, 2)
         self.assertIn("crop_region", config.enabled_tools)
-        self.assertIn("compare_with_reference", config.enabled_tools)
+        self.assertIn("zoom_region", config.enabled_tools)
 
     def test_config_from_yaml_file(self):
         yaml_content = """

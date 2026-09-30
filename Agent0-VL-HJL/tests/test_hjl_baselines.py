@@ -128,6 +128,7 @@ class TestHJLBaselines(unittest.TestCase):
             if old_val is not None:
                 os.environ["AGENT0_RESPONSES_API_KEY"] = old_val
 
+    @unittest.skip("Skipped while retrieve_normal_reference is commented out for general Agent0-VL")
     def test_react_runtime_injected_arguments_isolation(self):
         """ReAct agent-visible tool schemas must omit allow_synthetic, corpus_dir, and category, and runtime must inject them."""
         from hjl.tools_adapter import get_hjl_tool_definitions

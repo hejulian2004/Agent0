@@ -84,6 +84,7 @@ class TestHJLTools(unittest.TestCase):
         self.assertFalse(res.success)
         self.assertFalse(res.retriable)
 
+    @unittest.skip("Skipped while retrieve_normal_reference is commented out for general Agent0-VL")
     def test_retrieve_normal_reference_tool_result(self):
         result = execute_adapted_tool(
             "retrieve_normal_reference",
@@ -95,6 +96,7 @@ class TestHJLTools(unittest.TestCase):
         self.assertEqual(result.metadata.get("split"), "train")
         self.assertTrue(result.metadata.get("is_normal"))
 
+    @unittest.skip("Skipped while retrieve_normal_reference is commented out for general Agent0-VL")
     def test_retrieve_normal_reference_rejects_missing_in_live_mode(self):
         # In live mode (allow_synthetic=False), if reference corpus does not have the file, fail cleanly
         result = execute_adapted_tool(
@@ -121,6 +123,7 @@ class TestHJLTools(unittest.TestCase):
             validate_reference_metadata({"split": "train", "is_normal": False})
         self.assertIn("confirmed normal", str(ctx.exception))
 
+    @unittest.skip("Skipped while compare_with_reference is commented out for general Agent0-VL")
     def test_compare_with_reference_tool_result(self):
         result = execute_adapted_tool(
             "compare_with_reference",
@@ -135,12 +138,14 @@ class TestHJLTools(unittest.TestCase):
         self.assertIn("similarity", result.metadata)
         self.assertGreaterEqual(result.metadata["similarity"], 0.0)
 
+    @unittest.skip("Skipped while compare_with_reference is commented out for general Agent0-VL")
     def test_compare_with_reference_rejects_missing_path(self):
         result = execute_adapted_tool("compare_with_reference", {}, self.context)
         self.assertFalse(result.success)
         self.assertFalse(result.retriable)
         self.assertIn("'reference_path'", result.error or "")
 
+    @unittest.skip("Skipped while compare_with_reference is commented out for general Agent0-VL")
     def test_compare_with_reference_rejects_self_comparison(self):
         """Comparing the active image against itself must be strictly rejected."""
         curr_path = self.context["current_image_path"]
