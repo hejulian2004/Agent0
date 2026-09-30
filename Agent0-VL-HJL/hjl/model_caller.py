@@ -244,7 +244,7 @@ class ResponsesHJLModelCaller:
             "- observation: text description of overall visual surface\n"
             "- is_normal: boolean (true if completely defect-free, false if suspicious)\n"
             "- confidence: float between 0.0 and 1.0\n"
-            "- candidate_regions: list of objects with [x1, y1, x2, y2] bbox and confidence float"
+            "- candidate_regions: list of objects with [x1, y1, x2, y2] bbox and confidence float (e.g. [{\"bbox\": [x1, y1, x2, y2], \"confidence\": 0.95}])"
         )
 
         def _validate(data: dict[str, Any]) -> GlobalInspectionResult:
@@ -257,9 +257,19 @@ class ResponsesHJLModelCaller:
             for c in raw_cands:
                 if not isinstance(c, dict):
                     raise ValueError(f"candidate item must be a dict, got {type(c).__name__}")
-                bbox = require_list(c, "bbox")
-                if len(bbox) != 4 or not all(type(v) is int for v in bbox):
-                    raise ValueError(f"candidate bbox must be a list of 4 integers, got {bbox}")
+                raw_box = c.get("bbox") or c.get("box_2d") or c.get("bounding_box") or c.get("box")
+                if not isinstance(raw_box, list):
+                    raise ValueError(f"candidate bbox must be a list of 4 numbers, got {raw_box}")
+                if len(raw_box) != 4 or not all(isinstance(v, (int, float)) for v in raw_box):
+                    raise ValueError(f"candidate bbox must be a list of 4 numbers, got {raw_box}")
+
+                if "box_2d" in c and "bbox" not in c:
+                    y1, x1, y2, x2 = raw_box
+                    bbox = [int(min(x1, x2)), int(min(y1, y2)), int(max(x1, x2)), int(max(y1, y2))]
+                else:
+                    x1, y1, x2, y2 = raw_box
+                    bbox = [int(min(x1, x2)), int(min(y1, y2)), int(max(x1, x2)), int(max(y1, y2))]
+
                 c_conf = require_float(c, "confidence", 0.0, 1.0)
                 label = c.get("label")
                 candidates.append(CandidateRegion(bbox=bbox, confidence=c_conf, label=label))
