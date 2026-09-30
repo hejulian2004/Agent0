@@ -72,7 +72,7 @@ class Agent0Evaluator:
         image = sample.get("image_pil") or sample.get("image_path") or sample.get("image")
         content: str | list[dict[str, Any]] = render_solver_request(question)
         if image is not None:
-            if isinstance(image, str) and not os.path.isfile(image):
+            if isinstance(image, str) and not image.startswith("data:") and not os.path.isfile(image):
                 raise FileNotFoundError(image)
             content = [
                 {"type": "input_text", "text": render_solver_request(question)},

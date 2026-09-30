@@ -1,4 +1,4 @@
-"""Command-line interface to execute HJL inspection on an industrial image."""
+"""Command-line interface to execute HJL visual reasoning on an image."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def _create_mock_image() -> Path:
     """Create a temporary dummy image for smoke testing."""
     tmp = tempfile.NamedTemporaryFile(prefix="hjl_smoke_", suffix=".png", delete=False)
     img = Image.new("RGB", (100, 100), color=(180, 180, 180))
-    # Draw a small simulated defect
+    # Draw a small simulated target feature
     for x in range(40, 55):
         for y in range(40, 45):
             img.putpixel((x, y), (20, 20, 20))
@@ -36,8 +36,8 @@ def _create_mock_image() -> Path:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run HJL industrial visual anomaly detection.")
-    parser.add_argument("--image", type=str, default=None, help="Path to input industrial image.")
+    parser = argparse.ArgumentParser(description="Run HJL hierarchical visual reasoning agent.")
+    parser.add_argument("--image", type=str, default=None, help="Path to input image.")
     parser.add_argument(
         "--mode",
         type=str,
@@ -48,10 +48,10 @@ def main() -> None:
     parser.add_argument(
         "--instruction",
         type=str,
-        default="Perform industrial visual anomaly inspection.",
+        default="Perform visual inspection and reasoning.",
         help="Instruction prompt.",
     )
-    parser.add_argument("--category", type=str, default="metal_casting", help="Product category.")
+    parser.add_argument("--category", type=str, default="visual_object", help="Object or scene category.")
     parser.add_argument("--max-steps", type=int, default=None, help="Maximum allowable inspection steps.")
     parser.add_argument("--config", type=str, default="config.yaml", help="Configuration file path.")
     parser.add_argument(

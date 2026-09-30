@@ -61,8 +61,8 @@ class HJLEngine:
     def run_direct(
         self,
         image_path: str,
-        instruction: str = "Is there an anomaly in this component?",
-        category: str = "industrial_component",
+        instruction: str = "Analyze the visual features in this image.",
+        category: str = "visual_object",
     ) -> dict[str, Any]:
         """Baseline 1: Single-pass VLM inference without tools."""
         res = self.model_caller.direct_inspect(image_path, instruction, category)
@@ -94,9 +94,12 @@ class HJLEngine:
         history: list[dict[str, Any]] = []
         limit = max_steps or self.config.max_steps
         reg = get_tool_registry()
+        hjl_defs = {t["name"]: t for t in get_hjl_tool_definitions(agent_visible=True)}
+        reg_defs = {t["name"]: t for t in reg.definitions()}
+        all_defs = {**reg_defs, **hjl_defs}
         tool_defs = [
-            t for t in get_hjl_tool_definitions(agent_visible=True)
-            if t["name"] in self.config.enabled_tools
+            all_defs[name] for name in self.config.enabled_tools
+            if name in all_defs
         ]
 
         for step in range(1, limit + 1):
@@ -202,8 +205,8 @@ class HJLEngine:
     def run_react(
         self,
         image_path: str,
-        instruction: str = "Inspect this component for defects using tools.",
-        category: str = "industrial_component",
+        instruction: str = "Inspect this image using tools to answer visual questions.",
+        category: str = "visual_object",
         max_steps: int | None = None,
     ) -> dict[str, Any]:
         """Baseline 2: Standard ReAct loop with tools, without hierarchical checkpoints."""
@@ -224,8 +227,8 @@ class HJLEngine:
     def run_react_verifier(
         self,
         image_path: str,
-        instruction: str = "Inspect this component and verify the conclusion.",
-        category: str = "industrial_component",
+        instruction: str = "Inspect this image using tools and verify the visual conclusion.",
+        category: str = "visual_object",
         max_steps: int | None = None,
     ) -> dict[str, Any]:
         """Baseline 3: ReAct loop followed by generic VLM trajectory verification."""
@@ -271,8 +274,8 @@ class HJLEngine:
     def run_hjl(
         self,
         image_path: str,
-        instruction: str = "Perform hierarchical visual inspection for defects.",
-        category: str = "industrial_component",
+        instruction: str = "Perform hierarchical visual inspection and reasoning.",
+        category: str = "visual_object",
         max_steps: int | None = None,
         trajectory_output_path: str | Path | None = None,
     ) -> HJLState:

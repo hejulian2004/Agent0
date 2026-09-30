@@ -25,7 +25,7 @@ def evidence_verifier_node(
             status=EvidenceStatus.PASS,
             conclusion=EvidenceConclusion.ANOMALY,
             judgment_confidence=checkpoint_confidence_threshold,
-            reason=f"Accumulated evidence definitively confirms anomaly (anomaly_score={score:.2f} >= {anomaly_threshold}).",
+            reason=f"Accumulated evidence definitively confirms visual target (score={score:.2f} >= {anomaly_threshold}).",
         )
         return {"evidence_judgment": judgment}
 

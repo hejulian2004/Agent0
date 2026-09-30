@@ -40,7 +40,7 @@ def regional_verifier_node(
             judgment = CheckpointJudgment(
                 status=RegionalStatus.FAIL,
                 judgment_confidence=0.85,
-                reason=f"ROI resolution [{size[0]}x{size[1]}] is insufficient (<12px) to inspect fine defect textures.",
+                reason=f"ROI resolution [{size[0]}x{size[1]}] is insufficient (<12px) to inspect fine visual features.",
             )
             return {"regional_judgment": judgment}
 

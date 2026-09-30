@@ -127,8 +127,8 @@ class HJLModelCaller(Protocol):
         history: list[dict[str, Any]],
         image_path: str,
         enabled_tools: list[str],
-        instruction: str = "Inspect this component for defects using tools.",
-        category: str = "industrial_component",
+        instruction: str = "Inspect this image using tools.",
+        category: str = "visual_object",
         tool_definitions: list[dict[str, Any]] | None = None,
     ) -> ReactDecisionResult: ...
 
@@ -142,7 +142,10 @@ class HJLModelCaller(Protocol):
 
 
 def _image_to_base64_url(image_path: str | Path) -> str:
-    path = Path(image_path)
+    raw = str(image_path)
+    if raw.startswith("data:"):
+        return raw
+    path = Path(raw)
     if not path.is_file():
         raise FileNotFoundError(f"Image not found: {path}")
     data = path.read_bytes()
@@ -196,14 +199,15 @@ class ResponsesHJLModelCaller:
     ) -> T:
         """Execute Responses call and validate typed output with a single retry."""
         last_error: Exception | None = None
+        image_url = _image_to_base64_url(image_path) if image_path else None
 
         for attempt in range(2):
             try:
                 content: list[dict[str, Any]] = [{"type": "input_text", "text": prompt}]
-                if image_path:
+                if image_url:
                     content.append({
                         "type": "input_image",
-                        "image_url": _image_to_base64_url(image_path),
+                        "image_url": image_url,
                     })
 
                 response = self.client.responses.create(
@@ -222,7 +226,11 @@ class ResponsesHJLModelCaller:
                                 text += str(part.get("text", ""))
 
                 cleaned = _clean_json_markdown(text)
-                data = json.loads(cleaned)
+                try:
+                    data = json.loads(cleaned)
+                except Exception:
+                    from agent0_protocol.verifier import extract_json_dict
+                    data = extract_json_dict(text)
                 if not isinstance(data, dict):
                     raise ValueError(f"Model output root must be a JSON object, got {type(data).__name__}")
 
@@ -244,13 +252,10 @@ class ResponsesHJLModelCaller:
             img_w, img_h = None, None
 
         prompt = (
-            f"You are an industrial visual anomaly inspector. Inspect this {category} image.\n"
-            f"Instruction: {instruction}\n"
-            "Return JSON with EXACT keys:\n"
-            "- observation: text description of overall visual surface\n"
-            "- is_normal: boolean (true if completely defect-free, false if suspicious)\n"
-            "- confidence: float between 0.0 and 1.0\n"
-            "- candidate_regions: list of objects with [x1, y1, x2, y2] bbox and confidence float (e.g. [{\"bbox\": [x1, y1, x2, y2], \"confidence\": 0.95}])"
+            f"Inspect {category} image for key visual targets. Instruction: {instruction}\n"
+            "Return JSON:\n"
+            '{"observation": str, "is_normal": bool, "confidence": float, '
+            '"candidate_regions": [{"bbox": [x1, y1, x2, y2], "confidence": float}]}'
         )
 
         def _validate(data: dict[str, Any]) -> GlobalInspectionResult:
@@ -302,11 +307,25 @@ class ResponsesHJLModelCaller:
                     y_min = max(0, min(img_h, int(round(min(y1, y2)))))
                     x_max = max(0, min(img_w, int(round(max(x1, x2)))))
                     y_max = max(0, min(img_h, int(round(max(y1, y2)))))
+                    if x_max <= x_min:
+                        if x_min < img_w:
+                            x_max = x_min + 1
+                        else:
+                            x_min = max(0, x_max - 1)
+                    if y_max <= y_min:
+                        if y_min < img_h:
+                            y_max = y_min + 1
+                        else:
+                            y_min = max(0, y_max - 1)
                 else:
                     x_min = int(round(min(x1, x2)))
                     y_min = int(round(min(y1, y2)))
                     x_max = int(round(max(x1, x2)))
                     y_max = int(round(max(y1, y2)))
+                    if x_max <= x_min:
+                        x_max = x_min + 1
+                    if y_max <= y_min:
+                        y_max = y_min + 1
 
                 bbox = [x_min, y_min, x_max, y_max]
 
@@ -327,8 +346,8 @@ class ResponsesHJLModelCaller:
         self, image_path: str, candidate_region: list[int] | None, category: str
     ) -> HypothesisResult:
         prompt = (
-            f"Formulate a defect hypothesis for {category} at ROI {candidate_region}.\n"
-            "Return JSON with: hypothesis_id, type, description, confidence (0.0-1.0)."
+            f"Formulate visual hypothesis for {category} at ROI {candidate_region}.\n"
+            'Return JSON: {"hypothesis_id": str, "type": str, "description": str, "confidence": float}'
         )
 
         def _validate(data: dict[str, Any]) -> HypothesisResult:
@@ -350,14 +369,9 @@ class ResponsesHJLModelCaller:
         tool_name = observation.get("tool", "")
         meta = observation.get("metadata", {})
         prompt = (
-            f"You are an industrial visual inspection verifier evaluating a regional observation produced by {tool_name}.\n"
-            f"Observation metadata: {json.dumps(meta, ensure_ascii=False)}\n"
-            "Evaluate ONLY ROI quality, resolution, sharpness, and relevance to the visual inspection target.\n"
-            "Do NOT classify whether an anomaly exists.\n"
-            "Return JSON with:\n"
-            "- status: 'PASS' (ROI is sharp, sufficiently resolved, and informative) or 'FAIL' (ROI is blurry, corrupted, uninformative, or misses target structure)\n"
-            "- judgment_confidence: float between 0.0 and 1.0\n"
-            "- reason: concise explanation of the visual quality judgment"
+            f"Verify regional ROI quality from {tool_name}. Metadata: {json.dumps(meta, ensure_ascii=False, separators=(',', ':'))}\n"
+            "Evaluate ROI sharpness, resolution, and relevance (do not classify anomalies).\n"
+            'Return JSON: {"status": "PASS"|"FAIL", "judgment_confidence": float (0-1), "reason": str}'
         )
 
         def _validate(data: dict[str, Any]) -> RegionalVerificationResult:
@@ -380,12 +394,9 @@ class ResponsesHJLModelCaller:
         active_hypothesis: dict[str, Any] | None,
     ) -> RegionalEvidenceFinding:
         prompt = (
-            f"Analyze this cropped/zoomed region in regard to hypothesis: {active_hypothesis}.\n"
-            "Return JSON with:\n"
-            "- finding: factual description of the visual finding\n"
-            "- relation: 'SUPPORT' (confirms anomaly), 'CONTRADICT' (confirms normal feature), or 'NEUTRAL'\n"
-            "- observation_type: short category (e.g. 'crack_feature', 'normal_texture')\n"
-            "- confidence: float between 0.0 and 1.0"
+            f"Analyze regional evidence for hypothesis: {active_hypothesis}.\n"
+            'Return JSON: {"finding": str, "relation": "SUPPORT"|"CONTRADICT"|"NEUTRAL", '
+            '"observation_type": str, "confidence": float (0-1)}'
         )
 
         def _validate(data: dict[str, Any]) -> RegionalEvidenceFinding:
@@ -417,7 +428,7 @@ class ResponsesHJLModelCaller:
                 status=EvidenceStatus.PASS,
                 conclusion=EvidenceConclusion.ANOMALY,
                 judgment_confidence=0.90,
-                reason=f"Accumulated evidence confirms anomaly (score {score:.2f} >= {anomaly_threshold}).",
+                reason=f"Accumulated evidence confirms visual target (score {score:.2f} >= {anomaly_threshold}).",
             )
         has_explicit_normal = any(
             e.observation_type in {"normal_reference_match", "reference_comparison", "verified_normal_feature"}
@@ -463,19 +474,12 @@ class ResponsesHJLModelCaller:
             "error": observation.get("error") if observation else None,
         }
         prompt = (
-            f"Inspection checkpoint failed.\n"
-            f"Checkpoint reason: {getattr(verifier_judgment, 'reason', '')}\n"
-            f"Latest observation: {json.dumps(latest_obs_summary, ensure_ascii=False)}\n"
-            f"Evidence state: {json.dumps(ev_summary, ensure_ascii=False)}\n"
-            "Classify root cause strictly into one of:\n"
-            "- WRONG_REGION\n"
-            "- LOW_RESOLUTION\n"
-            "- MISSING_REFERENCE\n"
-            "- VIEWPOINT_MISMATCH\n"
-            "- CONTRADICTORY_EVIDENCE\n"
-            "- LOCALIZATION_UNCERTAIN\n"
-            "- PREMATURE_CONCLUSION\n"
-            "Return JSON: failure_type, cause, diagnosis_confidence (0.0-1.0)."
+            f"Inspection checkpoint failed. Reason: {getattr(verifier_judgment, 'reason', '')}\n"
+            f"Observation: {json.dumps(latest_obs_summary, ensure_ascii=False, separators=(',', ':'))}\n"
+            f"Evidence: {json.dumps(ev_summary, ensure_ascii=False, separators=(',', ':'))}\n"
+            "Classify root cause into: WRONG_REGION, LOW_RESOLUTION, MISSING_REFERENCE, "
+            "VIEWPOINT_MISMATCH, CONTRADICTORY_EVIDENCE, LOCALIZATION_UNCERTAIN, PREMATURE_CONCLUSION.\n"
+            'Return JSON: {"failure_type": str, "cause": str, "diagnosis_confidence": float (0-1)}'
         )
 
         def _validate(data: dict[str, Any]) -> FailureDiagnosisResult:
@@ -493,14 +497,9 @@ class ResponsesHJLModelCaller:
 
     def direct_inspect(self, image_path: str, instruction: str, category: str) -> DirectPredictionResult:
         prompt = (
-            f"Inspect this {category} image directly.\n"
-            f"Instruction: {instruction}\n"
-            "Return JSON with EXACT keys:\n"
-            "- is_anomaly: boolean\n"
-            "- conclusion: 'ANOMALY' or 'NORMAL'\n"
-            "- anomaly_score: float (0.0-1.0)\n"
-            "- confidence: float (0.0-1.0)\n"
-            "- explanation: str"
+            f"Directly inspect {category} image. Instruction: {instruction}\n"
+            'Return JSON: {"is_anomaly": bool, "conclusion": "ANOMALY"|"NORMAL", '
+            '"anomaly_score": float (0-1), "confidence": float (0-1), "explanation": str}'
         )
 
         def _validate(data: dict[str, Any]) -> DirectPredictionResult:
@@ -524,27 +523,23 @@ class ResponsesHJLModelCaller:
         history: list[dict[str, Any]],
         image_path: str,
         enabled_tools: list[str],
-        instruction: str = "Inspect this component for defects using tools.",
-        category: str = "industrial_component",
+        instruction: str = "Inspect this image using tools.",
+        category: str = "visual_object",
         tool_definitions: list[dict[str, Any]] | None = None,
     ) -> ReactDecisionResult:
         tools_spec = (
-            json.dumps(tool_definitions, indent=2, ensure_ascii=False)
+            json.dumps(tool_definitions, ensure_ascii=False, separators=(",", ":"))
             if tool_definitions
-            else json.dumps(enabled_tools, ensure_ascii=False)
+            else json.dumps(enabled_tools, ensure_ascii=False, separators=(",", ":"))
         )
+        history_spec = json.dumps(history[-4:] if history else [], ensure_ascii=False, separators=(",", ":"))
         prompt = (
-            f"You are a ReAct agent inspecting a {category} component for industrial visual anomalies.\n"
-            f"Instruction: {instruction}\n\n"
-            f"Available tools and parameter schemas:\n{tools_spec}\n\n"
-            f"History of previous steps:\n{json.dumps(history[-4:] if history else [], ensure_ascii=False)}\n\n"
-            "Decide next step. Return JSON with:\n"
-            "- action: 'TOOL_CALL' or 'FINISH'\n"
-            "- tool_name: tool name if TOOL_CALL\n"
-            "- tool_arguments: dict of arguments conforming to the tool's parameter schema if TOOL_CALL\n"
-            "- final_answer: str if FINISH\n"
-            "- is_anomaly: bool if FINISH\n"
-            "- confidence: float (0.0-1.0) if FINISH"
+            f"Visual reasoning agent inspecting {category}. Instruction: {instruction}\n"
+            f"Tools:\n{tools_spec}\n"
+            f"History:\n{history_spec}\n"
+            "Decide next step. Return JSON:\n"
+            '{"action": "TOOL_CALL", "tool_name": str, "tool_arguments": dict, "confidence": float (0-1)}\n'
+            'or: {"action": "FINISH", "final_answer": str, "is_anomaly": bool, "confidence": float (0-1)}'
         )
 
         def _validate(data: dict[str, Any]) -> ReactDecisionResult:
@@ -585,14 +580,10 @@ class ResponsesHJLModelCaller:
         category: str,
     ) -> GenericVerificationResult:
         prompt = (
-            f"You are a generic verifier reviewing an industrial inspection trajectory for {category}.\n"
-            f"Claimed conclusion: is_anomaly={decision.is_anomaly}, explanation={decision.final_answer}.\n"
-            f"Trajectory steps: {json.dumps(history[-6:] if history else [])}\n"
-            "Examine whether the visual trajectory observations factually justify this conclusion.\n"
-            "Return JSON with:\n"
-            "- passed: boolean (true if conclusion is verified by observations, false otherwise)\n"
-            "- confidence: float between 0.0 and 1.0\n"
-            "- feedback: explanation of the verification judgment"
+            f"Visual verification agent reviewing {category} inspection trajectory.\n"
+            f"Claim: is_anomaly={decision.is_anomaly}, explanation={decision.final_answer}\n"
+            f"History: {json.dumps(history[-4:] if history else [], ensure_ascii=False, separators=(',', ':'))}\n"
+            'Return JSON: {"passed": bool, "confidence": float (0-1), "feedback": str}'
         )
 
         def _validate(data: dict[str, Any]) -> GenericVerificationResult:
@@ -631,12 +622,12 @@ class MockHJLModelCaller:
             CandidateRegion(
                 bbox=[int(w * 0.2), int(h * 0.2), int(w * 0.8), int(h * 0.8)],
                 confidence=0.85,
-                label="primary_surface_defect_candidate",
+                label="primary_visual_target_candidate",
                 region_id="cand_0",
             )
         ]
         return GlobalInspectionResult(
-            observation=f"Identified candidate anomaly region on [{w}x{h}] surface.",
+            observation=f"Identified candidate target visual region on [{w}x{h}] surface.",
             candidate_regions=cands,
             is_normal=False,
             confidence=0.80,
@@ -647,9 +638,9 @@ class MockHJLModelCaller:
     ) -> HypothesisResult:
         self.call_history.append("generate_hypothesis")
         return HypothesisResult(
-            hypothesis_id="hyp_mock_crack_01",
-            type="crack",
-            description=f"Suspected crack on {category} surface.",
+            hypothesis_id="hyp_mock_feature_01",
+            type="visual_feature",
+            description=f"Key visual feature on {category}.",
             confidence=0.80,
             target_region=candidate_region,
         )
@@ -710,7 +701,7 @@ class MockHJLModelCaller:
                 status=EvidenceStatus.PASS,
                 conclusion=EvidenceConclusion.ANOMALY,
                 judgment_confidence=0.92,
-                reason=f"Definitive anomaly confirmed (score {score:.2f} >= {anomaly_threshold}).",
+                reason=f"Definitive visual target confirmed (score {score:.2f} >= {anomaly_threshold}).",
             )
         has_explicit_normal = any(
             e.observation_type in {"normal_reference_match", "reference_comparison", "verified_normal_feature"}
@@ -777,8 +768,8 @@ class MockHJLModelCaller:
         history: list[dict[str, Any]],
         image_path: str,
         enabled_tools: list[str],
-        instruction: str = "Inspect this component for defects using tools.",
-        category: str = "industrial_component",
+        instruction: str = "Inspect this image using tools.",
+        category: str = "visual_object",
         tool_definitions: list[dict[str, Any]] | None = None,
     ) -> ReactDecisionResult:
         self.call_history.append("react_step")
@@ -907,8 +898,8 @@ class ScriptedHJLModelCaller:
         history: list[dict[str, Any]],
         image_path: str,
         enabled_tools: list[str],
-        instruction: str = "Inspect this component for defects using tools.",
-        category: str = "industrial_component",
+        instruction: str = "Inspect this image using tools.",
+        category: str = "visual_object",
         tool_definitions: list[dict[str, Any]] | None = None,
     ) -> ReactDecisionResult:
         self.call_history.append("react_step")

@@ -63,7 +63,7 @@ class RuleBasedFailureDiagnoser:
                 cause = "Observations are contradictory; requires reference cross-validation or alternative ROI."
             elif len(ev.normal_references) == 0:
                 failure_type = FailureType.MISSING_REFERENCE
-                cause = "Cannot verify anomaly without comparing against a standard normal template."
+                cause = "Cannot verify visual target without comparing against a standard normal template."
             elif ev.unresolved_regions:
                 failure_type = FailureType.PREMATURE_CONCLUSION
                 cause = f"{len(ev.unresolved_regions)} candidate region(s) still remain uninspected."

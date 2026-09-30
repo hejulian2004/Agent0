@@ -161,10 +161,11 @@ def parse_verification_output(text: str) -> dict[str, Any] | None:
     if not isinstance(val, dict):
         return None
     step_key = "step_index" if "step_index" in val else ("step" if "step" in val else None)
-    if "score" in val and "confidence" in val:
+    if "score" in val:
         try:
             score = max(-1.0, min(1.0, float(val["score"])))
-            conf = max(0.0, min(1.0, float(val["confidence"])))
+            conf_val = val.get("confidence", 0.8)
+            conf = max(0.0, min(1.0, float(conf_val)))
             res = dict(val)
             res["score"] = score
             res["confidence"] = conf

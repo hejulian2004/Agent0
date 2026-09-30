@@ -7,7 +7,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from agent0_protocol.adapters import QwenModelAdapter
+from agent0_protocol.adapters import QwenModelAdapter, ResponsesAdapter
 from agent0_protocol.responses_runtime import CapabilityError, ResponsesConfig, ResponsesRuntime
 from agent0_protocol.schema import CanonicalTrajectory, ProtocolError, RawRollout
 from agent0_protocol.tools import ToolRegistry, get_tool_registry
@@ -187,6 +187,58 @@ class ProtocolTests(unittest.TestCase):
         result = runtime.run_verifier(traj)
         self.assertEqual(result.get("score"), 1.0)
         self.assertEqual(result.get("confidence"), 0.9)
+
+    def test_responses_adapter_handles_dict_and_string_arguments(self):
+        adapter = ResponsesAdapter()
+        # Case 1: arguments is a valid JSON string
+        resp1 = FakeResponse([{"type": "function_call", "call_id": "c1", "name": "echo", "arguments": '{"value": 42}'}])
+        items1 = adapter.output_items(resp1)
+        self.assertEqual(items1[0]["arguments"], {"value": 42})
+
+        # Case 2: arguments is already a dictionary
+        resp2 = FakeResponse([{"type": "function_call", "call_id": "c2", "name": "echo", "arguments": {"value": 42}}])
+        items2 = adapter.output_items(resp2)
+        self.assertEqual(items2[0]["arguments"], {"value": 42})
+
+    def test_qwen_adapter_compact_rendering_and_deduplication(self):
+        tokenizer = FakeTokenizer()
+        adapter = QwenModelAdapter(tokenizer)
+        items = [{"type": "message", "role": "system", "content": "System directive."}]
+        rendered = adapter.render(items, self.registry.definitions(), generate=False)
+        self.assertIn("Available functions:", rendered)
+        # Verify compact JSON separators (no ': ' spaces)
+        self.assertIn('"name":"echo"', rendered)
+
+        # Ensure no duplication if already rendered
+        items_dup = [{"type": "message", "role": "system", "content": rendered}]
+        rendered_dup = adapter.render(items_dup, self.registry.definitions(), generate=False)
+        self.assertEqual(rendered_dup.count("Available functions:"), 1)
+
+    def test_repair_inherits_image_context(self):
+        class CaptureResponses:
+            def __init__(self):
+                self.requests = []
+
+            def create(self, **request):
+                self.requests.append(request)
+                return FakeResponse([{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Repaired"}]}])
+
+        fake = CaptureResponses()
+        runtime = ResponsesRuntime(self.config, self.registry, client=SimpleNamespace(responses=fake), probe_on_init=False)
+        traj = CanonicalTrajectory("t_repair", self.registry.definitions())
+        traj.append({
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Inspect"},
+                {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="},
+            ],
+        })
+        traj.append({"type": "message", "role": "assistant", "content": "Need repair"})
+
+        repaired_traj = runtime.run_repair(traj, {"issue": "check bbox"})
+        self.assertEqual(repaired_traj.items[-1]["type"], "message")
+        self.assertEqual(repaired_traj.items[-1]["content"][0]["text"], "Repaired")
 
 
 if __name__ == "__main__":

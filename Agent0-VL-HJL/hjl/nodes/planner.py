@@ -46,7 +46,7 @@ def planner_node(
         selected_action = state.selected_action or allowed_actions[0]
 
         if selected_action == ActionType.RETRIEVE_REFERENCE:
-            category = state.category or "industrial_component"
+            category = state.category or "visual_object"
             ret_args: dict[str, Any] = {
                 "category": category,
                 "allow_synthetic": allow_synthetic,
@@ -162,7 +162,7 @@ def planner_node(
             })
         elif selected_action == ActionType.RETRIEVE_REFERENCE:
             ret_args2: dict[str, Any] = {
-                "category": state.category or "industrial_component",
+                "category": state.category or "visual_object",
                 "allow_synthetic": allow_synthetic,
             }
             if reference_corpus_dir:
@@ -195,7 +195,7 @@ def planner_node(
         plan = {
             "phase": phase.value,
             "action": selected_action.value,
-            "intent": f"Inspect target region {target_bbox} for {state.active_hypothesis.get('type') if state.active_hypothesis else 'defect'}.",
+            "intent": f"Inspect target region {target_bbox} for {state.active_hypothesis.get('type') if state.active_hypothesis else 'visual_feature'}.",
             "tool_call": tool_calls[0],
         }
 

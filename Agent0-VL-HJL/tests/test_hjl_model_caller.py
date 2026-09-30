@@ -250,6 +250,56 @@ class TestHJLModelCaller(unittest.TestCase):
             res_pixels = caller_pixels.inspect_global(tmp.name, "Inspect", "bottle")
             self.assertEqual(res_pixels.candidate_regions[0].bbox, [100, 200, 500, 600])
 
+            # 4. Degenerate bbox auto-adjustment (x1 == x2 or y1 == y2)
+            caller_degen = FakeResponsesCaller({
+                "observation": "Narrow scratch",
+                "is_normal": False,
+                "confidence": 0.85,
+                "candidate_regions": [{"bbox": [50, 50, 50, 80], "confidence": 0.90}],
+            })
+            res_degen = caller_degen.inspect_global(tmp.name, "Inspect", "bottle")
+            self.assertTrue(res_degen.candidate_regions[0].bbox[0] < res_degen.candidate_regions[0].bbox[2])
+
+    def test_image_to_base64_url_data_url(self):
+        from hjl.model_caller import _image_to_base64_url
+
+        data_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        self.assertEqual(_image_to_base64_url(data_url), data_url)
+
+    def test_adapted_tool_executes_canonical_tools(self):
+        from agent0_protocol.tools import ToolExecutionContext, get_tool_registry
+        from hjl.tools_adapter import execute_adapted_tool
+        from PIL import Image
+
+        img = Image.new("RGB", (20, 20), color="blue")
+        context = ToolExecutionContext(image=img)
+        try:
+            # crop_image is a canonical tool from get_tool_registry()
+            res = execute_adapted_tool("crop_image", {"bbox": [0, 0, 5, 5]}, context)
+            self.assertTrue(res.success)
+            self.assertEqual(res.metadata.get("image_size"), [5, 5])
+        finally:
+            context.close()
+
+    def test_call_and_validate_handles_conversational_json_markdown(self):
+        from unittest.mock import MagicMock
+        from hjl.model_caller import ResponsesHJLModelCaller
+
+        caller = ResponsesHJLModelCaller(api_key="mock_key")
+        # Simulate model returning conversational text + markdown fenced JSON
+        mock_response = MagicMock()
+        mock_response.output = [{
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "output_text", "text": "Here is my diagnosis:\n```json\n{\"score\": 0.95, \"label\": \"crack\"}\n```\nHope this helps!"}
+            ],
+        }]
+        caller.client.responses.create = MagicMock(return_value=mock_response)
+
+        res = caller._call_and_validate("prompt", None, lambda d: d)
+        self.assertEqual(res, {"score": 0.95, "label": "crack"})
+
 
 if __name__ == "__main__":
     unittest.main()

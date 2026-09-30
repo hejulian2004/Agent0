@@ -289,7 +289,7 @@ def _compare_images_simple(
 
 
 def _locate_or_create_reference_image(
-    category: str = "industrial_component",
+    category: str = "visual_object",
     corpus_dir: str | Path | None = None,
     allow_synthetic: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
@@ -300,7 +300,7 @@ def _locate_or_create_reference_image(
             files = sorted(c_path.glob("*.png")) + sorted(c_path.glob("*.jpg"))
             if files:
                 meta = {
-                    "dataset": "industrial_corpus",
+                    "dataset": "reference_corpus",
                     "category": category,
                     "split": "train",
                     "is_normal": True,
@@ -360,6 +360,28 @@ def execute_adapted_tool(
 ) -> ToolResult:
     """Execute an adapted HJL visual tool. Pure function returning ToolResult without mutating HJLState."""
     reg = registry or get_tool_registry()
+
+    if reg.contains(name):
+        try:
+            out = reg.execute(
+                {"type": "function_call", "name": name, "call_id": new_call_id(), "arguments": arguments},
+                context,
+            )
+            success = bool(out.get("success", False))
+            error = out.get("error") if not success else None
+            return ToolResult(
+                success=success,
+                output_path=out.get("output_path"),
+                metadata=copy.deepcopy(out),
+                error=error,
+                retriable=_is_retriable_error(error),
+            )
+        except Exception as exc:
+            return ToolResult(
+                success=False,
+                error=f"{type(exc).__name__}: {exc}",
+                retriable=_is_retriable_error(str(exc)),
+            )
 
     # 1. Unified JSON Schema validation against HJL_TOOL_DEFINITIONS
     tool_defs = {t["name"]: t for t in HJL_TOOL_DEFINITIONS}

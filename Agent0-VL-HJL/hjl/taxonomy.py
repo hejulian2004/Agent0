@@ -24,10 +24,10 @@ class EvidenceStatus(str, Enum):
 
 
 class EvidenceRelation(str, Enum):
-    """Semantic relation of an observation to the active anomaly hypothesis."""
-    SUPPORT = "SUPPORT"          # Confirms anomaly / active hypothesis
+    """Semantic relation of an observation to the active visual hypothesis."""
+    SUPPORT = "SUPPORT"          # Confirms active hypothesis
     CONTRADICT = "CONTRADICT"    # Directly refutes active hypothesis
-    NEUTRAL = "NEUTRAL"          # Valid finding but doesn't refute defects elsewhere
+    NEUTRAL = "NEUTRAL"          # Valid finding but doesn't refute target features elsewhere
 
 
 class EvidenceConclusion(str, Enum):
@@ -69,7 +69,7 @@ class EvidenceJudgment:
 
 
 class FailureType(str, Enum):
-    """System-wide 8-class defect inspection failure taxonomy."""
+    """System-wide 8-class visual inspection failure taxonomy."""
     # Deterministic failure (tool crash / execution error)
     TOOL_FAILURE = "TOOL_FAILURE"
 

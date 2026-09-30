@@ -151,8 +151,8 @@ class HJLState:
     """Explicit shared state passed between HJL graph nodes."""
     sample_id: str
     image_path: str
-    instruction: str = "Determine whether the image has an industrial defect and describe it."
-    category: str = "industrial_component"
+    instruction: str = "Inspect the image and analyze target visual elements."
+    category: str = "visual_object"
     phase: HJLPhase = HJLPhase.HYPOTHESIS_INSPECTION
 
     global_observation: str | dict[str, Any] = ""

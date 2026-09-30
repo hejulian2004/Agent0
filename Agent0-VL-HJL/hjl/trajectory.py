@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from agent0_protocol.schema import CanonicalTrajectory, new_call_id
+from agent0_protocol.tools import get_tool_registry
 
 from .state import HJLState
 from .tools_adapter import get_hjl_tool_definitions
@@ -26,7 +27,44 @@ def append_trajectory_step(
 
 def to_canonical_trajectory(state: HJLState) -> CanonicalTrajectory:
     """Convert an HJLState and its observation history to a valid CanonicalTrajectory."""
-    tools = get_hjl_tool_definitions(agent_visible=True)
+    tools = list(get_hjl_tool_definitions(agent_visible=True))
+    tool_names = {t["name"] for t in tools}
+    for t in get_tool_registry().definitions():
+        if t["name"] not in tool_names:
+            tools.append(copy.deepcopy(t))
+            tool_names.add(t["name"])
+
+    # Ensure any observed tool in history has a conforming function schema
+    for obs in state.observations:
+        name = obs.get("tool")
+        if name and name not in tool_names:
+            args = obs.get("arguments", {})
+            properties = {}
+            for k, v in args.items():
+                if isinstance(v, bool):
+                    properties[k] = {"type": "boolean"}
+                elif isinstance(v, int):
+                    properties[k] = {"type": "integer"}
+                elif isinstance(v, float):
+                    properties[k] = {"type": "number"}
+                elif isinstance(v, list):
+                    item_type = "integer" if v and all(isinstance(x, int) for x in v) else "string"
+                    properties[k] = {"type": "array", "items": {"type": item_type}}
+                else:
+                    properties[k] = {"type": "string"}
+            tools.append({
+                "type": "function",
+                "name": name,
+                "description": f"Tool {name}.",
+                "parameters": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": list(args.keys()),
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            })
+            tool_names.add(name)
 
     trajectory = CanonicalTrajectory(
         trajectory_id=f"traj_hjl_{state.sample_id}",

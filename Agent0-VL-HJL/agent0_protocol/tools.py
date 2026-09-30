@@ -544,7 +544,7 @@ def _default_registry() -> ToolRegistry:
         {
             "type": "function",
             "name": "python_exec",
-            "description": "Run Python; preloaded: math, np, Image, cv2, sp, RapidOCR.",
+            "description": "Execute Python code (preloaded: math, np, Image, cv2, sp, RapidOCR).",
             "parameters": {
                 "type": "object",
                 "properties": {"code": {"type": "string"}},
@@ -559,7 +559,7 @@ def _default_registry() -> ToolRegistry:
         {
             "type": "function",
             "name": "crop_image",
-            "description": "Crop current image to [x1,y1,x2,y2]; result becomes current.",
+            "description": "Crop image to bbox [x1,y1,x2,y2].",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -576,7 +576,7 @@ def _default_registry() -> ToolRegistry:
         {
             "type": "function",
             "name": "zoom_image",
-            "description": "Resize current image by scale; result becomes current.",
+            "description": "Resize image by float scale factor.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -593,7 +593,7 @@ def _default_registry() -> ToolRegistry:
         {
             "type": "function",
             "name": "rotate_image",
-            "description": "Rotate current image by degrees; result becomes current.",
+            "description": "Rotate image by degrees angle.",
             "parameters": {
                 "type": "object",
                 "properties": {"angle": {"type": "number"}},
@@ -608,7 +608,7 @@ def _default_registry() -> ToolRegistry:
         {
             "type": "function",
             "name": "ocr",
-            "description": "OCR current image text.",
+            "description": "Extract text from image using OCR.",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -623,7 +623,7 @@ def _default_registry() -> ToolRegistry:
         {
             "type": "function",
             "name": "plot_parser",
-            "description": "OCR current chart labels and locations.",
+            "description": "Extract chart labels and coordinates.",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -638,7 +638,7 @@ def _default_registry() -> ToolRegistry:
         {
             "type": "function",
             "name": "visual_analyzer",
-            "description": "Summarize current image size, colors, and dark bounds.",
+            "description": "Analyze image dimensions, dominant colors, and bounds.",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -653,7 +653,7 @@ def _default_registry() -> ToolRegistry:
         {
             "type": "function",
             "name": "object_detector",
-            "description": "Detect COCO objects in current image.",
+            "description": "Detect COCO objects in image.",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -668,7 +668,7 @@ def _default_registry() -> ToolRegistry:
         {
             "type": "function",
             "name": "retrieve",
-            "description": "Keyword-search local documents.",
+            "description": "Keyword search local documents.",
             "parameters": {
                 "type": "object",
                 "properties": {"query": {"type": "string"}},

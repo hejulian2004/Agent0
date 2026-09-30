@@ -18,10 +18,16 @@ class ResponsesAdapter:
             raw = value.model_dump(mode="json") if hasattr(value, "model_dump") else dict(value)
             kind = raw.get("type")
             if kind == "function_call":
-                try:
-                    arguments = json.loads(raw["arguments"])
-                except (KeyError, TypeError, json.JSONDecodeError) as exc:
-                    raise ProtocolError("Responses function arguments are not valid JSON") from exc
+                raw_args = raw.get("arguments")
+                if isinstance(raw_args, dict):
+                    arguments = raw_args
+                elif isinstance(raw_args, str):
+                    try:
+                        arguments = json.loads(raw_args)
+                    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+                        raise ProtocolError("Responses function arguments are not valid JSON") from exc
+                else:
+                    raise ProtocolError("Responses function arguments must be a JSON object or valid JSON string")
                 if not isinstance(arguments, dict):
                     raise ProtocolError("Responses function arguments must be a JSON object")
                 items.append({
@@ -173,17 +179,18 @@ class QwenModelAdapter:
                 if role not in {"system", "developer", "user", "assistant"}:
                     raise ProtocolError("invalid semantic message role")
                 content = self._content_text(item["content"])
-                if role == "system":
-                    content += "\n\nAvailable functions:\n" + json.dumps(tools, ensure_ascii=False)
+                if role == "system" and tools:
+                    if "Available functions:" not in content:
+                        content += "\n\nAvailable functions:\n" + json.dumps(tools, ensure_ascii=False, separators=(",", ":"))
                 parts.append(f"<|im_start|>{role}\n{content}<|im_end|>\n")
             elif kind == "reasoning":
                 summary = "".join(str(part.get("text", "")) for part in item["summary"])
                 parts.append(f"<|im_start|>assistant\n{self.OPEN_REASONING}{summary}{self.CLOSE_REASONING}<|im_end|>\n")
             elif kind == "function_call":
-                payload = json.dumps({"name": item["name"], "arguments": item["arguments"]}, ensure_ascii=False)
+                payload = json.dumps({"name": item["name"], "arguments": item["arguments"]}, ensure_ascii=False, separators=(",", ":"))
                 parts.append(f"<|im_start|>assistant\n{self.OPEN_CALL}{payload}{self.CLOSE_CALL}<|im_end|>\n")
             elif kind == "function_call_output":
-                payload = json.dumps({"call_id": item["call_id"], "output": item["output"]}, ensure_ascii=False)
+                payload = json.dumps({"call_id": item["call_id"], "output": item["output"]}, ensure_ascii=False, separators=(",", ":"))
                 parts.append(f"<|im_start|>tool\n{payload}<|im_end|>\n")
             else:
                 raise ProtocolError(f"unsupported item type: {kind!r}")

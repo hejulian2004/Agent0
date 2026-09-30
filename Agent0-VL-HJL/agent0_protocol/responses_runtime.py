@@ -184,7 +184,8 @@ class ResponsesRuntime:
                 calls = [item for item in output_items if item["type"] == "function_call"]
                 for item in output_items:
                     trajectory.append(item)
-                history.extend(response.output)
+                for item in response.output:
+                    history.append(item.model_dump(mode="json") if hasattr(item, "model_dump") else item)
                 if not calls:
                     if not any(item["type"] == "message" for item in output_items):
                         raise ProtocolError("Responses returned neither a message nor a function call")
@@ -246,9 +247,14 @@ class ResponsesRuntime:
         from verl.prompts.agent0_templates import render_repair_request
 
         prompt = render_repair_request(trajectory, feedback)
+        resolved_context = dict(tool_context or {})
+        if not resolved_context.get("current_image_path"):
+            orig_image = input_image_from_items(trajectory.items)
+            if orig_image is not None:
+                resolved_context["current_image_path"] = orig_image
         return self.run(
             [{"type": "message", "role": "user", "content": prompt}],
             trajectory_id=f"{trajectory.trajectory_id}_repaired",
             metadata={"source_trajectory_id": trajectory.trajectory_id, "role": "repair", "feedback": dict(feedback)},
-            tool_context=tool_context,
+            tool_context=resolved_context,
         )

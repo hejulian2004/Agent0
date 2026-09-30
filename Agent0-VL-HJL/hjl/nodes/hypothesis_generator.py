@@ -13,11 +13,11 @@ def hypothesis_generator_node(
     model_caller: HJLModelCaller | None = None,
     live_mode: bool = False,
 ) -> dict[str, Any]:
-    """Formulate initial defect hypotheses based on global observation and candidate regions."""
+    """Formulate initial visual hypotheses based on global observation and candidate regions."""
     hypotheses = list(state.hypotheses)
 
     if not hypotheses:
-        category = state.category or "industrial_component"
+        category = state.category or "visual_object"
         target_bbox = state.candidate_regions[0]["bbox"] if state.candidate_regions else None
 
         if model_caller is not None:
@@ -35,9 +35,9 @@ def hypothesis_generator_node(
 
         if not hypotheses:
             hypotheses.append({
-                "hypothesis_id": "hyp_surface_defect_01",
-                "type": "surface_abnormality",
-                "description": f"Potential surface defect, scratch, crack, or contamination on {category}.",
+                "hypothesis_id": "hyp_visual_feature_01",
+                "type": "visual_feature",
+                "description": f"Target visual feature or pattern on {category}.",
                 "confidence": 0.70,
                 "target_region": target_bbox,
             })

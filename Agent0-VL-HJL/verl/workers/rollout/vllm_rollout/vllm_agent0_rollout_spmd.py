@@ -170,42 +170,25 @@ class vLLMAgent0Rollout(vLLMRollout):
 
         JSON braces are escaped as ``{{ }}`` for use with ``str.format``.
         """
-        self.verifier_prompt_template = """Now switch to the Verifier role. Verify the reasoning step above using the available evidence.
-
-Step to evaluate:
-{step_content}
-
-Tool outputs (if any):
-{tool_outputs}
-
-Principles:
-- Ground verification on objective tool evidence.
-- Penalize unsupported or inconsistent reasoning.
-- High confidence requires agreement between tool and text.
-
-Output exactly one JSON line:
+        self.verifier_prompt_template = """Verifier role: verify the reasoning step using available evidence.
+Step: {step_content}
+Tool outputs: {tool_outputs}
+Ground verification in tool evidence; penalize inconsistent reasoning.
+Output one JSON line:
 {{"step_index": {step_index}, "score": <-1 to 1>, "confidence": <0 to 1>, "critique": "<at most 2 sentences>", "tool_check": <true|false>}}"""
 
-        self.repair_prompt_template = """Now switch to the Self-Repair role. The Verifier flagged the reasoning step with low confidence.
-
-Verification result:
-- Score: {score}
-- Confidence: {confidence}
-- Critique: {critique}
-
-Original step:
-{original_step}
-
-Propose a minimal local patch that fixes the specific error WITHOUT rewriting validated context.
-Output exactly one JSON line, either:
+        self.repair_prompt_template = """Self-Repair role: Verifier flagged step with low confidence.
+Verification: score={score}, confidence={confidence}, critique={critique}
+Original step: {original_step}
+Propose a minimal local patch fixing the error without rewriting validated context.
+Output one JSON line, either:
 {{"action": "PATCH", "target_step": {step_index}, "patch_type": "<text|code|tool_call|parameter>", "new_content": "<minimal replacement>", "justification": "<at most 2 sentences>"}}
 or:
 {{"action": "NO_CHANGE", "target_step": {step_index}, "reason": "<why repair is not warranted>"}}"""
 
-        self.regenerate_prompt_template = """A repair instruction has been issued for the previous step:
+        self.regenerate_prompt_template = """Repair instruction issued:
 {repair_instruction}
-
-Switch back to the Solver role. Re-derive the corrected reasoning step applying this patch, then continue toward the final answer."""
+Solver role: re-derive corrected reasoning step applying this patch, then continue."""
 
     def _get_template_tokens(self, template_key: str, **kwargs) -> List[int]:
         """Convert prompt template to token ids with variable substitution"""
