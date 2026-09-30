@@ -45,12 +45,12 @@ def main() -> None:
         help="Instruction prompt.",
     )
     parser.add_argument("--category", type=str, default="metal_casting", help="Product category.")
-    parser.add_argument("--max-steps", type=int, default=8, help="Maximum allowable inspection steps.")
+    parser.add_argument("--max-steps", type=int, default=None, help="Maximum allowable inspection steps.")
     parser.add_argument("--config", type=str, default="config.yaml", help="Configuration file path.")
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="outputs/hjl_trajectories",
+        default=None,
         help="Directory to save trajectories.",
     )
     parser.add_argument("--mock", action="store_true", help="Use mock model caller and generate test image if needed.")
@@ -66,7 +66,7 @@ def main() -> None:
 
     # Load configuration
     config = HJLConfig.from_yaml(args.config)
-    if args.max_steps:
+    if args.max_steps is not None:
         config.max_steps = args.max_steps
 
     out_dir = Path(args.output_dir or config.trajectory_output_dir)

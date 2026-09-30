@@ -84,6 +84,11 @@ class CompiledGraph:
             if current_node == "finalizer":
                 break
 
+            # Centralized terminal intercept for any non-None stop_reason
+            if state.stop_reason is not None:
+                current_node = "finalizer"
+                continue
+
             # Determine next node
             if current_node in self.conditional_edges:
                 router_fn, path_map = self.conditional_edges[current_node]
@@ -156,6 +161,8 @@ def create_hjl_graph(
     context: ToolExecutionContext | None = None,
     config: HJLConfig | None = None,
     model_caller: HJLModelCaller | None = None,
+    allow_synthetic: bool = False,
+    live_mode: bool = False,
 ) -> CompiledGraph:
     """Build and compile the canonical Hierarchical Judgment Loop graph with tool-type routing."""
     from .nodes.evidence_extractor import evidence_extractor_node
@@ -181,18 +188,34 @@ def create_hjl_graph(
     workflow = StateGraph(state_schema=HJLState)
 
     # Wrap nodes with bound dependencies
-    workflow.add_node("global_inspector", lambda s: global_inspector_node(s, model_caller=model_caller))
-    workflow.add_node("hypothesis_generator", hypothesis_generator_node)
+    workflow.add_node(
+        "global_inspector",
+        lambda s: global_inspector_node(s, model_caller=model_caller, live_mode=live_mode),
+    )
+    workflow.add_node(
+        "hypothesis_generator",
+        lambda s: hypothesis_generator_node(s, model_caller=model_caller, live_mode=live_mode),
+    )
     workflow.add_node(
         "global_verifier",
         lambda s: global_verifier_node(
             s, global_normal_confidence_threshold=cfg.global_normal_confidence_threshold
         ),
     )
-    workflow.add_node("planner", planner_node)
+    workflow.add_node(
+        "planner",
+        lambda s: planner_node(
+            s,
+            reference_corpus_dir=cfg.reference_corpus_dir,
+            allow_synthetic=allow_synthetic,
+        ),
+    )
     workflow.add_node("tool_executor", lambda s: tool_executor_node(s, context=context))
     workflow.add_node("regional_verifier", regional_verifier_node)
-    workflow.add_node("evidence_extractor", lambda s: evidence_extractor_node(s, model_caller=model_caller))
+    workflow.add_node(
+        "evidence_extractor",
+        lambda s: evidence_extractor_node(s, model_caller=model_caller, live_mode=live_mode),
+    )
     workflow.add_node("reference_state_updater", reference_state_updater_node)
     workflow.add_node(
         "comparison_evidence_extractor",
@@ -218,7 +241,10 @@ def create_hjl_graph(
             min_evidence_count=cfg.min_evidence_count,
         ),
     )
-    workflow.add_node("failure_diagnoser", lambda s: failure_diagnoser_node(s, model_caller=model_caller))
+    workflow.add_node(
+        "failure_diagnoser",
+        lambda s: failure_diagnoser_node(s, model_caller=model_caller, live_mode=live_mode),
+    )
     workflow.add_node("replanner", replanner_node)
     workflow.add_node("finalizer", finalizer_node)
 

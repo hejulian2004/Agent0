@@ -23,6 +23,13 @@ class EvidenceStatus(str, Enum):
     FAIL = "FAIL"
 
 
+class EvidenceRelation(str, Enum):
+    """Semantic relation of an observation to the active anomaly hypothesis."""
+    SUPPORT = "SUPPORT"          # Confirms anomaly / active hypothesis
+    CONTRADICT = "CONTRADICT"    # Directly refutes active hypothesis
+    NEUTRAL = "NEUTRAL"          # Valid finding but doesn't refute defects elsewhere
+
+
 class EvidenceConclusion(str, Enum):
     ANOMALY = "ANOMALY"
     NORMAL = "NORMAL"

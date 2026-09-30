@@ -5,11 +5,15 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from ..state import HJLPhase, HJLState
+from ..state import HJLPhase, HJLState, StopReason
 from ..taxonomy import ActionType
 
 
-def planner_node(state: HJLState) -> dict[str, Any]:
+def planner_node(
+    state: HJLState,
+    reference_corpus_dir: str | None = None,
+    allow_synthetic: bool = False,
+) -> dict[str, Any]:
     """Plan concrete tool call based on current phase and allowed action mask."""
     phase = state.phase
     allowed_actions = list(state.allowed_actions)
@@ -24,7 +28,7 @@ def planner_node(state: HJLState) -> dict[str, Any]:
         selected_action = allowed_actions[0]
         tool_calls.append({
             "name": "localize_candidate",
-            "arguments": {},
+            "arguments": {"use_original": True},
         })
 
         plan = {
@@ -45,7 +49,11 @@ def planner_node(state: HJLState) -> dict[str, Any]:
             category = state.category or "industrial_component"
             tool_calls.append({
                 "name": "retrieve_normal_reference",
-                "arguments": {"category": category},
+                "arguments": {
+                    "category": category,
+                    "corpus_dir": reference_corpus_dir,
+                    "allow_synthetic": allow_synthetic,
+                },
             })
         elif selected_action == ActionType.CROSS_VALIDATE:
             ref_path = (
@@ -55,7 +63,11 @@ def planner_node(state: HJLState) -> dict[str, Any]:
             )
             tool_calls.append({
                 "name": "compare_with_reference",
-                "arguments": {"reference_path": ref_path} if ref_path else {},
+                "arguments": {
+                    "reference_path": ref_path,
+                    "normalized_bbox": state.active_region_normalized_bbox,
+                    "rotation_deg": state.active_region_rotation_deg,
+                } if ref_path else {},
             })
         elif selected_action == ActionType.ENHANCE_REGION:
             tool_calls.append({
@@ -70,12 +82,17 @@ def planner_node(state: HJLState) -> dict[str, Any]:
             )
             tool_calls.append({
                 "name": "crop_region",
-                "arguments": {"bbox": next_bbox},
+                "arguments": {"bbox": next_bbox, "use_original": True},
             })
+        elif selected_action == ActionType.RETRY_TOOL:
+            if state.last_failed_tool_call is not None:
+                tool_calls.append(copy.deepcopy(state.last_failed_tool_call))
+            else:
+                return {"stop_reason": StopReason.NO_VALID_ACTION}
         else:
             tool_calls.append({
                 "name": "crop_region",
-                "arguments": {"bbox": [0, 0, 20, 20]},
+                "arguments": {"bbox": [0, 0, 20, 20], "use_original": True},
             })
 
         plan = {
@@ -92,7 +109,7 @@ def planner_node(state: HJLState) -> dict[str, Any]:
 
         selected_action = state.selected_action or allowed_actions[0]
 
-        # Determine target region
+        # Determine target region (in original-image space)
         target_bbox = None
         if state.evidence_state.unresolved_regions:
             target_bbox = state.evidence_state.unresolved_regions[0]
@@ -104,7 +121,7 @@ def planner_node(state: HJLState) -> dict[str, Any]:
             target_bbox = [0, 0, 50, 50]
 
         if selected_action == ActionType.ENHANCE_REGION:
-            # If region was already cropped, zoom; else crop
+            # If region was already cropped, zoom; else crop from original image
             if state.observations and any(o.get("tool") == "crop_region" for o in state.observations):
                 tool_calls.append({
                     "name": "zoom_region",
@@ -113,7 +130,7 @@ def planner_node(state: HJLState) -> dict[str, Any]:
             else:
                 tool_calls.append({
                     "name": "crop_region",
-                    "arguments": {"bbox": target_bbox},
+                    "arguments": {"bbox": target_bbox, "use_original": True},
                 })
         elif selected_action == ActionType.CROSS_VALIDATE:
             ref_path = (
@@ -123,17 +140,25 @@ def planner_node(state: HJLState) -> dict[str, Any]:
             )
             tool_calls.append({
                 "name": "compare_with_reference",
-                "arguments": {"reference_path": ref_path} if ref_path else {},
+                "arguments": {
+                    "reference_path": ref_path,
+                    "normalized_bbox": state.active_region_normalized_bbox,
+                    "rotation_deg": state.active_region_rotation_deg,
+                } if ref_path else {},
             })
         elif selected_action == ActionType.RETRIEVE_REFERENCE:
             tool_calls.append({
                 "name": "retrieve_normal_reference",
-                "arguments": {"category": state.category or "industrial_component"},
+                "arguments": {
+                    "category": state.category or "industrial_component",
+                    "corpus_dir": reference_corpus_dir,
+                    "allow_synthetic": allow_synthetic,
+                },
             })
         elif selected_action == ActionType.RELOCALIZE:
             tool_calls.append({
                 "name": "localize_candidate",
-                "arguments": {},
+                "arguments": {"use_original": True},
             })
         elif selected_action == ActionType.ALIGN_VIEW:
             tool_calls.append({
@@ -141,14 +166,14 @@ def planner_node(state: HJLState) -> dict[str, Any]:
                 "arguments": {"angle": 90.0},
             })
         elif selected_action == ActionType.RETRY_TOOL:
-            tool_calls.append({
-                "name": "crop_region",
-                "arguments": {"bbox": target_bbox},
-            })
+            if state.last_failed_tool_call is not None:
+                tool_calls.append(copy.deepcopy(state.last_failed_tool_call))
+            else:
+                return {"stop_reason": StopReason.NO_VALID_ACTION}
         else:
             tool_calls.append({
                 "name": "crop_region",
-                "arguments": {"bbox": target_bbox},
+                "arguments": {"bbox": target_bbox, "use_original": True},
             })
 
         plan = {

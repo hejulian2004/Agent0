@@ -8,9 +8,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..model_caller import FailureDiagnosisResult, HJLModelCaller
+from ..model_caller import HJLModelCaller
 from ..routing import FailureRoutingPolicy
-from ..state import HJLState
+from ..schemas import FailureDiagnosisResult
+from ..state import HJLState, StopReason
 from ..taxonomy import (
     EvidenceStatus,
     FailureDiagnosis,
@@ -96,12 +97,15 @@ class VLMFailureDiagnoser:
 def failure_diagnoser_node(
     state: HJLState,
     model_caller: HJLModelCaller | None = None,
+    live_mode: bool = False,
 ) -> dict[str, Any]:
     """Diagnose root cause of checkpoint failure and set allowed action mask."""
     if model_caller is not None:
         try:
             diag_result = VLMFailureDiagnoser.diagnose(state, model_caller)
         except Exception:
+            if live_mode:
+                return {"stop_reason": StopReason.MODEL_ERROR}
             diag_result = RuleBasedFailureDiagnoser.diagnose(state)
     else:
         diag_result = RuleBasedFailureDiagnoser.diagnose(state)

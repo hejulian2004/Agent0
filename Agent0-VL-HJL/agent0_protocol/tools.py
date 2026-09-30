@@ -70,6 +70,8 @@ class ToolExecutionContext(dict[str, Any]):
         path, owned = _materialize_image(image)
         if owned:
             self._image_files.add(path)
+        if "original_image_path" not in self:
+            self["original_image_path"] = str(path)
         self["current_image_path"] = str(path)
         self._image_changed = True
 

@@ -17,16 +17,17 @@ from hjl.tools_adapter import (
 
 class TestHJLTools(unittest.TestCase):
     def setUp(self):
-        # Create a small dummy image for testing
+        # Create a small dummy image for testing (60x40)
         self.tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
         img = Image.new("RGB", (60, 40), color="blue")
         img.save(self.tmp.name)
         self.image_path = Path(self.tmp.name)
         self.context = ToolExecutionContext(image=self.image_path)
+        self.context["original_image_path"] = str(self.image_path)
 
-        # Create a distinct reference image
+        # Create a distinct reference image (120x80) with different dimensions to test normalized bbox
         self.ref_tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        ref_img = Image.new("RGB", (60, 40), color="red")
+        ref_img = Image.new("RGB", (120, 80), color="red")
         ref_img.save(self.ref_tmp.name)
         self.ref_path = Path(self.ref_tmp.name)
 
@@ -41,23 +42,68 @@ class TestHJLTools(unittest.TestCase):
         self.assertIsNotNone(result.output_path)
         self.assertEqual(result.metadata["image_size"], [20, 20])
         self.assertIsInstance(result, ToolResult)
+        self.assertIn("retriable", result.to_dict())
+
+    def test_crop_region_requires_bbox_and_valid_geometry(self):
+        # Missing bbox
+        res1 = execute_adapted_tool("crop_region", {}, self.context)
+        self.assertFalse(res1.success)
+        self.assertFalse(res1.retriable)
+        self.assertIn("Missing required argument 'bbox'", res1.error or "")
+
+        # Invalid geometry: x1 >= x2
+        res2 = execute_adapted_tool("crop_region", {"bbox": [20, 0, 10, 20]}, self.context)
+        self.assertFalse(res2.success)
+        self.assertFalse(res2.retriable)
+        self.assertIn("Invalid bbox dimensions", res2.error or "")
 
     def test_zoom_region_tool_result(self):
         result = execute_adapted_tool("zoom_region", {"scale": 2.0}, self.context)
         self.assertTrue(result.success)
         self.assertEqual(result.metadata["image_size"], [120, 80])
 
+    def test_zoom_region_requires_positive_scale(self):
+        # Missing scale
+        res1 = execute_adapted_tool("zoom_region", {}, self.context)
+        self.assertFalse(res1.success)
+        self.assertFalse(res1.retriable)
+
+        # Zero or negative scale
+        res2 = execute_adapted_tool("zoom_region", {"scale": -1.5}, self.context)
+        self.assertFalse(res2.success)
+        self.assertFalse(res2.retriable)
+
     def test_rotate_image_tool_result(self):
         result = execute_adapted_tool("rotate_image", {"angle": 90.0}, self.context)
         self.assertTrue(result.success)
         self.assertEqual(result.metadata["image_size"], [40, 60])
 
+    def test_rotate_image_requires_angle(self):
+        res = execute_adapted_tool("rotate_image", {}, self.context)
+        self.assertFalse(res.success)
+        self.assertFalse(res.retriable)
+
     def test_retrieve_normal_reference_tool_result(self):
-        result = execute_adapted_tool("retrieve_normal_reference", {"category": "metal_casting"}, self.context)
+        result = execute_adapted_tool(
+            "retrieve_normal_reference",
+            {"category": "metal_casting", "allow_synthetic": True},
+            self.context,
+        )
         self.assertTrue(result.success)
         self.assertIn("reference_path", result.metadata)
         self.assertEqual(result.metadata.get("split"), "train")
         self.assertTrue(result.metadata.get("is_normal"))
+
+    def test_retrieve_normal_reference_rejects_missing_in_live_mode(self):
+        # In live mode (allow_synthetic=False), if reference corpus does not have the file, fail cleanly
+        result = execute_adapted_tool(
+            "retrieve_normal_reference",
+            {"category": "nonexistent_category_12345", "allow_synthetic": False},
+            self.context,
+        )
+        self.assertFalse(result.success)
+        self.assertFalse(result.retriable)
+        self.assertIn("No train-normal reference available", result.error or "")
 
     def test_reference_anti_leakage_runtime_validation(self):
         """Reference metadata must strictly be train-split normal samples."""
@@ -77,7 +123,11 @@ class TestHJLTools(unittest.TestCase):
     def test_compare_with_reference_tool_result(self):
         result = execute_adapted_tool(
             "compare_with_reference",
-            {"reference_path": str(self.ref_path)},
+            {
+                "reference_path": str(self.ref_path),
+                "normalized_bbox": [0.1, 0.1, 0.5, 0.5],
+                "rotation_deg": 90.0,
+            },
             self.context,
         )
         self.assertTrue(result.success)
@@ -87,6 +137,7 @@ class TestHJLTools(unittest.TestCase):
     def test_compare_with_reference_rejects_missing_path(self):
         result = execute_adapted_tool("compare_with_reference", {}, self.context)
         self.assertFalse(result.success)
+        self.assertFalse(result.retriable)
         self.assertIn("Missing required argument 'reference_path'", result.error or "")
 
     def test_compare_with_reference_rejects_self_comparison(self):
@@ -98,16 +149,24 @@ class TestHJLTools(unittest.TestCase):
             self.context,
         )
         self.assertFalse(result.success)
+        self.assertFalse(result.retriable)
         self.assertIn("Self-comparison rejected", result.error or "")
+
+    def test_localize_candidate_returns_empty_when_no_defect(self):
+        """Clean solid image has no dark boxes; must return empty candidate_regions list without fake center fallback."""
+        result = execute_adapted_tool("localize_candidate", {"use_original": True}, self.context)
+        self.assertTrue(result.success)
+        self.assertEqual(result.metadata.get("candidate_regions"), [])
 
     def test_unknown_tool_fails_gracefully(self):
         result = execute_adapted_tool("nonexistent_tool", {}, self.context)
         self.assertFalse(result.success)
+        self.assertFalse(result.retriable)
         self.assertIn("Unknown tool", result.error or "")
 
     def test_tool_context_rollback_on_failure(self):
         initial_path = self.context["current_image_path"]
-        self.context.save_checkpoint()
+        checkpoint = self.context.checkpoint()
 
         # Execute valid crop
         res = execute_adapted_tool("crop_region", {"bbox": [5, 5, 25, 25]}, self.context)
@@ -115,7 +174,7 @@ class TestHJLTools(unittest.TestCase):
         self.assertNotEqual(self.context["current_image_path"], initial_path)
 
         # Rollback restores initial path
-        self.context.rollback()
+        self.context.rollback(checkpoint)
         self.assertEqual(self.context["current_image_path"], initial_path)
 
 

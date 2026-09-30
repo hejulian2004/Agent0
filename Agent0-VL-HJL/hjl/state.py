@@ -7,11 +7,13 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
 
+from .schemas import RegionalEvidenceFinding
 from .taxonomy import (
     ActionType,
     CheckpointJudgment,
     EvidenceConclusion,
     EvidenceJudgment,
+    EvidenceRelation,
     EvidenceStatus,
     FailureType,
     GlobalStatus,
@@ -33,13 +35,18 @@ class StopReason(str, Enum):
     MAX_STEPS = "MAX_STEPS"                        # Reached maximum allowed execution steps
     TOOL_FAILURE_LIMIT = "TOOL_FAILURE_LIMIT"      # Consecutive tool execution failures exceeded limit
     NO_VALID_ACTION = "NO_VALID_ACTION"            # Action space exhausted without remaining candidate actions
+    MODEL_ERROR = "MODEL_ERROR"                    # Unrecoverable model caller or parsing error in live mode
 
 
-class EvidenceRelation(str, Enum):
-    """Semantic relation of an observation to the active anomaly hypothesis."""
-    SUPPORT = "SUPPORT"          # Confirms anomaly / active hypothesis
-    CONTRADICT = "CONTRADICT"    # Directly refutes active hypothesis
-    NEUTRAL = "NEUTRAL"          # Valid finding (clear ROI, normal reference match) but doesn't refute defects elsewhere
+# Re-export EvidenceRelation for backward compatibility
+__all__ = [
+    "HJLPhase",
+    "StopReason",
+    "EvidenceRelation",
+    "EvidenceItem",
+    "EvidenceState",
+    "HJLState",
+]
 
 
 @dataclass
@@ -146,6 +153,8 @@ class HJLState:
     phase: HJLPhase = HJLPhase.HYPOTHESIS_INSPECTION
 
     global_observation: str | dict[str, Any] = ""
+    global_is_normal: bool = False
+    global_confidence: float = 0.0
     candidate_regions: list[dict[str, Any]] = field(default_factory=list)
 
     hypotheses: list[dict[str, Any]] = field(default_factory=list)
@@ -156,6 +165,12 @@ class HJLState:
 
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     observations: list[dict[str, Any]] = field(default_factory=list)
+
+    extracted_finding: RegionalEvidenceFinding | None = None
+    active_region_original_bbox: list[int] | None = None
+    active_region_normalized_bbox: list[float] | None = None
+    active_region_rotation_deg: float = 0.0
+    last_failed_tool_call: dict[str, Any] | None = None
 
     evidence_state: EvidenceState = field(default_factory=EvidenceState)
 
@@ -186,6 +201,8 @@ class HJLState:
             "category": self.category,
             "phase": self.phase.value if isinstance(self.phase, Enum) else str(self.phase),
             "global_observation": copy.deepcopy(self.global_observation),
+            "global_is_normal": self.global_is_normal,
+            "global_confidence": float(self.global_confidence),
             "candidate_regions": copy.deepcopy(self.candidate_regions),
             "hypotheses": copy.deepcopy(self.hypotheses),
             "active_hypothesis": copy.deepcopy(self.active_hypothesis),
@@ -193,6 +210,11 @@ class HJLState:
             "plan_history": copy.deepcopy(self.plan_history),
             "tool_calls": copy.deepcopy(self.tool_calls),
             "observations": copy.deepcopy(self.observations),
+            "extracted_finding": self.extracted_finding.to_dict() if self.extracted_finding else None,
+            "active_region_original_bbox": list(self.active_region_original_bbox) if self.active_region_original_bbox else None,
+            "active_region_normalized_bbox": list(self.active_region_normalized_bbox) if self.active_region_normalized_bbox else None,
+            "active_region_rotation_deg": float(self.active_region_rotation_deg),
+            "last_failed_tool_call": copy.deepcopy(self.last_failed_tool_call),
             "evidence_state": self.evidence_state.to_dict(),
             "global_judgment": self.global_judgment.to_dict() if self.global_judgment else None,
             "regional_judgment": self.regional_judgment.to_dict() if self.regional_judgment else None,

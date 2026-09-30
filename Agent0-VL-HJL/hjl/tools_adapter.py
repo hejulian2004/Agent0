@@ -29,6 +29,7 @@ class ToolResult:
     output_path: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    retriable: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -36,6 +37,7 @@ class ToolResult:
             "output_path": self.output_path,
             "metadata": copy.deepcopy(self.metadata),
             "error": self.error,
+            "retriable": bool(self.retriable),
         }
 
 
@@ -50,12 +52,33 @@ def validate_reference_metadata(ref_metadata: Mapping[str, Any]) -> None:
         raise ValueError("Reference must be a confirmed normal training sample, got is_normal=False.")
 
 
-def _compare_images_simple(image_a_path: Path, image_b_path: Path) -> dict[str, Any]:
-    """Compute difference statistics between two distinct images."""
+def _compare_images_simple(
+    image_a_path: Path,
+    image_b_path: Path,
+    normalized_bbox: list[float] | None = None,
+    rotation_deg: float = 0.0,
+) -> dict[str, Any]:
+    """Compute difference statistics between two distinct images with spatial & rotational alignment."""
     try:
         with Image.open(image_a_path) as img_a, Image.open(image_b_path) as img_b:
             img_a_rgb = img_a.convert("RGB")
-            img_b_resized = img_b.convert("RGB").resize(img_a_rgb.size)
+            w_ref, h_ref = img_b.size
+
+            if normalized_bbox and len(normalized_bbox) == 4:
+                nx1, ny1, nx2, ny2 = normalized_bbox
+                rx1 = max(0, min(w_ref - 1, int(round(nx1 * w_ref))))
+                ry1 = max(0, min(h_ref - 1, int(round(ny1 * h_ref))))
+                rx2 = max(rx1 + 1, min(w_ref, int(round(nx2 * w_ref))))
+                ry2 = max(ry1 + 1, min(h_ref, int(round(ny2 * h_ref))))
+                ref_patch = img_b.convert("RGB").crop((rx1, ry1, rx2, ry2))
+            else:
+                ref_patch = img_b.convert("RGB")
+
+            rot = float(rotation_deg) % 360.0
+            if rot != 0.0:
+                ref_patch = ref_patch.rotate(rot, expand=True)
+
+            img_b_resized = ref_patch.resize(img_a_rgb.size, Image.Resampling.BILINEAR)
 
             diff_count = 0
             total_diff = 0.0
@@ -93,8 +116,9 @@ def _compare_images_simple(image_a_path: Path, image_b_path: Path) -> dict[str, 
 def _locate_or_create_reference_image(
     category: str = "industrial_component",
     corpus_dir: str | Path | None = None,
+    allow_synthetic: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
-    """Retrieve train-split normal reference image or synthesize a pristine normal template."""
+    """Retrieve train-split normal reference image or synthesize if explicitly allowed."""
     if corpus_dir:
         c_path = Path(corpus_dir) / category / "train" / "good"
         if c_path.is_dir():
@@ -127,7 +151,13 @@ def _locate_or_create_reference_image(
             validate_reference_metadata(meta)
             return files[0], meta
 
-    # Create / cache a pristine normal reference template for this category
+    if not allow_synthetic:
+        raise FileNotFoundError(
+            f"No train-normal reference available for category '{category}' in reference corpus. "
+            "Synthetic references are strictly rejected in live/production mode."
+        )
+
+    # In mock/offline testing mode only: create / cache a synthetic reference template
     cache_dir = Path(tempfile.gettempdir()) / "hjl_reference_corpus" / category / "train" / "good"
     cache_dir.mkdir(parents=True, exist_ok=True)
     ref_file = cache_dir / "normal_ref_000.png"
@@ -158,25 +188,60 @@ def execute_adapted_tool(
 
     try:
         if name == "crop_region":
-            bbox = arguments.get("bbox", [0, 0, 10, 10])
+            if "bbox" not in arguments:
+                return ToolResult(
+                    success=False,
+                    error="Missing required argument 'bbox' for crop_region.",
+                    retriable=False,
+                )
+            bbox = arguments["bbox"]
+            if not isinstance(bbox, list) or len(bbox) != 4 or bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
+                return ToolResult(
+                    success=False,
+                    error=f"Invalid bbox dimensions: {bbox}",
+                    retriable=False,
+                )
+
+            use_original = bool(arguments.get("use_original", False))
+            work_context = context.fork()
+            if use_original and "original_image_path" in context:
+                work_context["current_image_path"] = context["original_image_path"]
+
             call = {
                 "type": "function_call",
                 "call_id": new_call_id(),
                 "name": "crop_image",
                 "arguments": {"bbox": bbox},
             }
-            output = reg.execute(call, context)
+            output = reg.execute(call, work_context)
             if output.get("success"):
+                context.adopt_image_from(work_context)
                 path = str(_current_image_path(context))
                 return ToolResult(
                     success=True,
                     output_path=path,
                     metadata={"image_size": output.get("image_size"), "bbox": bbox},
                 )
-            return ToolResult(success=False, error=output.get("error", "crop_image failed"))
+            return ToolResult(success=False, error=output.get("error", "crop_image failed"), retriable=False)
 
         elif name == "zoom_region":
-            scale = float(arguments.get("scale", 2.0))
+            if "scale" not in arguments:
+                return ToolResult(
+                    success=False,
+                    error="Missing required argument 'scale' for zoom_region.",
+                    retriable=False,
+                )
+            try:
+                scale = float(arguments["scale"])
+                if scale <= 0:
+                    raise ValueError("scale must be positive")
+            except (ValueError, TypeError) as exc:
+                return ToolResult(
+                    success=False,
+                    error=f"Invalid scale for zoom_region: {exc}",
+                    retriable=False,
+                )
+
             call = {
                 "type": "function_call",
                 "call_id": new_call_id(),
@@ -191,10 +256,24 @@ def execute_adapted_tool(
                     output_path=path,
                     metadata={"image_size": output.get("image_size"), "scale": scale},
                 )
-            return ToolResult(success=False, error=output.get("error", "zoom_image failed"))
+            return ToolResult(success=False, error=output.get("error", "zoom_image failed"), retriable=False)
 
         elif name == "rotate_image":
-            angle = float(arguments.get("angle", 90.0))
+            if "angle" not in arguments:
+                return ToolResult(
+                    success=False,
+                    error="Missing required argument 'angle' for rotate_image.",
+                    retriable=False,
+                )
+            try:
+                angle = float(arguments["angle"])
+            except (ValueError, TypeError) as exc:
+                return ToolResult(
+                    success=False,
+                    error=f"Invalid angle for rotate_image: {exc}",
+                    retriable=False,
+                )
+
             call = {
                 "type": "function_call",
                 "call_id": new_call_id(),
@@ -209,17 +288,29 @@ def execute_adapted_tool(
                     output_path=path,
                     metadata={"image_size": output.get("image_size"), "angle": angle},
                 )
-            return ToolResult(success=False, error=output.get("error", "rotate_image failed"))
+            return ToolResult(success=False, error=output.get("error", "rotate_image failed"), retriable=False)
 
         elif name == "retrieve_normal_reference":
             category = str(arguments.get("category", "industrial_component"))
             corpus_dir = arguments.get("corpus_dir")
-            ref_path, meta = _locate_or_create_reference_image(category, corpus_dir)
-            return ToolResult(
-                success=True,
-                output_path=str(ref_path),
-                metadata=meta,
-            )
+            allow_synthetic = bool(arguments.get("allow_synthetic", False))
+            try:
+                ref_path, meta = _locate_or_create_reference_image(
+                    category=category,
+                    corpus_dir=corpus_dir,
+                    allow_synthetic=allow_synthetic,
+                )
+                return ToolResult(
+                    success=True,
+                    output_path=str(ref_path),
+                    metadata=meta,
+                )
+            except Exception as exc:
+                return ToolResult(
+                    success=False,
+                    error=f"No train-normal reference available in reference corpus: {exc}",
+                    retriable=False,
+                )
 
         elif name == "compare_with_reference":
             ref_path_str = arguments.get("reference_path")
@@ -229,6 +320,7 @@ def execute_adapted_tool(
                 return ToolResult(
                     success=False,
                     error="Missing required argument 'reference_path' for compare_with_reference.",
+                    retriable=False,
                 )
 
             ref_path = Path(ref_path_str)
@@ -236,6 +328,7 @@ def execute_adapted_tool(
                 return ToolResult(
                     success=False,
                     error=f"Reference image not found at: {ref_path_str}",
+                    retriable=False,
                 )
 
             # Strictly reject comparing active image against itself
@@ -243,11 +336,20 @@ def execute_adapted_tool(
                 return ToolResult(
                     success=False,
                     error="Self-comparison rejected: reference image cannot be the current active inspection image.",
+                    retriable=False,
                 )
 
-            diff_meta = _compare_images_simple(current_path, ref_path)
+            normalized_bbox = arguments.get("normalized_bbox")
+            rotation_deg = float(arguments.get("rotation_deg", 0.0))
+
+            diff_meta = _compare_images_simple(
+                current_path,
+                ref_path,
+                normalized_bbox=normalized_bbox,
+                rotation_deg=rotation_deg,
+            )
             if "error" in diff_meta:
-                return ToolResult(success=False, error=diff_meta["error"])
+                return ToolResult(success=False, error=diff_meta["error"], retriable=False)
 
             return ToolResult(
                 success=True,
@@ -256,29 +358,24 @@ def execute_adapted_tool(
             )
 
         elif name == "localize_candidate":
-            current_path = _current_image_path(context)
+            analysis_context = context.fork()
+            if arguments.get("use_original", True) and "original_image_path" in context:
+                analysis_context["current_image_path"] = context["original_image_path"]
+
             call = {
                 "type": "function_call",
                 "call_id": new_call_id(),
                 "name": "visual_analyzer",
                 "arguments": {},
             }
-            output = reg.execute(call, context)
+            output = reg.execute(call, analysis_context)
             candidates = []
             if output.get("success"):
                 dark_box = output.get("analysis", {}).get("dark_bbox")
                 if dark_box:
                     candidates.append({"bbox": dark_box, "confidence": 0.85, "label": "salient_region"})
 
-            if not candidates:
-                with Image.open(current_path) as img:
-                    w, h = img.size
-                    candidates.append({
-                        "bbox": [int(w * 0.25), int(h * 0.25), int(w * 0.75), int(h * 0.75)],
-                        "confidence": 0.5,
-                        "label": "center_region",
-                    })
-
+            current_path = _current_image_path(context)
             return ToolResult(
                 success=True,
                 output_path=str(current_path),
@@ -286,7 +383,7 @@ def execute_adapted_tool(
             )
 
         else:
-            return ToolResult(success=False, error=f"Unknown tool: {name}")
+            return ToolResult(success=False, error=f"Unknown tool: {name}", retriable=False)
 
     except Exception as exc:
-        return ToolResult(success=False, error=f"{type(exc).__name__}: {exc}")
+        return ToolResult(success=False, error=f"{type(exc).__name__}: {exc}", retriable=False)

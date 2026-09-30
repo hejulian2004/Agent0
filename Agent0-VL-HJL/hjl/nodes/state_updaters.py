@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from ..model_caller import RegionalEvidenceFinding
+from ..schemas import RegionalEvidenceFinding
 from ..state import EvidenceRelation, HJLState, StopReason
 from ..taxonomy import ActionType
 from ..tools_adapter import validate_reference_metadata

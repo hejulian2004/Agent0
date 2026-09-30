@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..model_caller import RegionalEvidenceFinding
+from ..schemas import RegionalEvidenceFinding
 from ..state import EvidenceItem, EvidenceRelation, HJLState
 
 
@@ -135,4 +135,7 @@ def evidence_updater_node(
     contradict_weight = sum(e.confidence for e in evidence_state.contradicting_evidence)
     evidence_state.anomaly_score = max(0.0, min(1.0, support_weight - contradict_weight))
 
-    return {"evidence_state": evidence_state}
+    return {
+        "evidence_state": evidence_state,
+        "extracted_finding": None,
+    }

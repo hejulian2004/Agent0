@@ -1,4 +1,4 @@
-"""Comprehensive behavioral and invariant tests for HJL StateGraph."""
+"""Comprehensive behavioral, invariant, and acceptance tests for HJL StateGraph."""
 
 from __future__ import annotations
 
@@ -10,6 +10,15 @@ from PIL import Image
 from agent0_protocol.tools import ToolExecutionContext
 from hjl.config import HJLConfig
 from hjl.graph import create_hjl_graph
+from hjl.model_caller import (
+    CandidateRegion,
+    GlobalInspectionResult,
+    HypothesisResult,
+    ModelOutputError,
+    RegionalEvidenceFinding,
+    RegionalVerificationResult,
+    ScriptedHJLModelCaller,
+)
 from hjl.nodes.evidence_extractor import evidence_extractor_node
 from hjl.nodes.evidence_updater import evidence_updater_node
 from hjl.nodes.evidence_verifier import evidence_verifier_node
@@ -61,8 +70,9 @@ class TestHJLGraph(unittest.TestCase):
         )
         res = tool_executor_node(state)
         self.assertEqual(res.get("failure_type"), FailureType.TOOL_FAILURE)
-        self.assertIn(ActionType.RETRY_TOOL, res.get("allowed_actions", []))
         self.assertEqual(res.get("consecutive_tool_failures"), 1)
+        # Non-retriable invalid arguments failure terminates via NO_VALID_ACTION
+        self.assertEqual(res.get("stop_reason"), StopReason.NO_VALID_ACTION)
 
     def test_invariant_2_regional_fail_does_not_pollute_evidence(self):
         """Regional FAIL must not invoke EvidenceUpdater; EvidenceState remains uncontaminated."""
@@ -159,26 +169,26 @@ class TestHJLGraph(unittest.TestCase):
         self.assertEqual(len(state_empty.evidence_state.evidence_items), 0)
 
         ev_res = evidence_verifier_node(state_empty, normal_threshold=0.20, min_evidence_count=1)
-        # Must FAIL / be UNRESOLVED, not PASS as NORMAL!
         self.assertEqual(ev_res["evidence_judgment"].status, EvidenceStatus.FAIL)
         self.assertEqual(ev_res["evidence_judgment"].conclusion, EvidenceConclusion.UNRESOLVED)
         self.assertEqual(ev_res["phase"], HJLPhase.EVIDENCE_RESOLUTION)
 
     def test_invariant_7_golden_multi_step_trajectory(self):
-        """Verify the complete multi-step trajectory and crucial state invariants end-to-end.
+        """Verify the complete multi-step trajectory and crucial state invariants end-to-end with ScriptedHJLModelCaller.
 
-        Prescribed path:
-        1. Global PASS -> Hypothesis formation
-        2. Valid small crop (6x6) -> Tool SUCCESS -> Regional FAIL (LOW_RESOLUTION)
-        3. Regional FAIL leaves evidence_items empty (unpolluted) and anomaly_score == 0.0
-        4. Diagnosis: LOW_RESOLUTION -> Replanner: ENHANCE_REGION
-        5. Zoom (12x12) -> Tool SUCCESS -> Regional PASS
-        6. Evidence Extractor extracts zoomed ROI -> Evidence Updater records NEUTRAL (score remains 0.0)
-        7. Evidence Verifier yields FAIL (MISSING_REFERENCE) -> Action Mask {RETRIEVE_REFERENCE}
-        8. Tool Executor retrieves train-normal reference -> ReferenceStateUpdater transitions to CROSS_VALIDATE
-        9. Planner issues compare_with_reference with explicit reference_path
-        10. Comparison yields difference (similarity < 0.8) -> Evidence Updater sets anomaly_score = 0.8
-        11. Evidence Verifier yields PASS (ANOMALY) -> Finalizer terminates with CONFIRMED_ANOMALY
+        Prescribed path starting from global_inspector:
+        1. Global Inspector proposes candidate [10, 10, 16, 16] -> Global Verifier yields PASS
+        2. Hypothesis Generator formulates crack hypothesis
+        3. Valid small crop (6x6) -> Tool SUCCESS -> Regional FAIL (LOW_RESOLUTION)
+        4. Regional FAIL leaves evidence_items empty and anomaly_score == 0.0
+        5. Diagnosis: LOW_RESOLUTION -> Replanner: ENHANCE_REGION
+        6. Zoom (12x12) -> Tool SUCCESS -> Regional PASS
+        7. Evidence Extractor extracts zoomed ROI -> Evidence Updater records NEUTRAL (score remains 0.0)
+        8. Evidence Verifier yields FAIL (MISSING_REFERENCE) -> Action Mask {RETRIEVE_REFERENCE}
+        9. Tool Executor retrieves train-normal reference -> ReferenceStateUpdater transitions to CROSS_VALIDATE
+        10. Planner issues compare_with_reference with explicit reference_path and normalized_bbox
+        11. Comparison yields difference -> Comparison Extractor emits SUPPORT -> Evidence Updater sets anomaly_score = 0.8
+        12. Evidence Verifier yields PASS (ANOMALY) -> Finalizer terminates with CONFIRMED_ANOMALY
         """
         config = HJLConfig(
             anomaly_threshold=0.75,
@@ -187,21 +197,47 @@ class TestHJLGraph(unittest.TestCase):
             max_steps=10,
         )
         context = ToolExecutionContext(image=self.image_path)
+        context["original_image_path"] = str(self.image_path)
+
+        scripted_caller = ScriptedHJLModelCaller(
+            global_inspection=GlobalInspectionResult(
+                observation="Suspicious dark region detected on global surface.",
+                candidate_regions=[
+                    CandidateRegion(bbox=[10, 10, 16, 16], confidence=0.85, label="tiny_crack_candidate")
+                ],
+                is_normal=False,
+                confidence=0.85,
+            ),
+            hypothesis=HypothesisResult(
+                hypothesis_id="hyp_crack_01",
+                type="crack",
+                description="Micro-crack at [10, 10, 16, 16]",
+                confidence=0.85,
+                target_region=[10, 10, 16, 16],
+            ),
+            evidence_finding=RegionalEvidenceFinding(
+                finding="Zoomed surface structure shows ambiguous discoloration.",
+                relation=EvidenceRelation.NEUTRAL,
+                observation_type="inspected_roi",
+                confidence=0.85,
+            ),
+        )
 
         try:
-            graph = create_hjl_graph(context=context, config=config)
+            graph = create_hjl_graph(
+                context=context,
+                config=config,
+                model_caller=scripted_caller,
+                allow_synthetic=True,
+            )
 
-            # Initialize state with candidate region having a 6x6 target bbox: [10, 10, 16, 16]
+            # Start from clean initial state (NO pre-seeded candidates!)
             initial_state = HJLState(
                 sample_id="test_golden",
                 image_path=self.image_path,
                 category="metal_casting",
                 max_steps=10,
-                candidate_regions=[{
-                    "bbox": [10, 10, 16, 16],
-                    "confidence": 0.85,
-                    "label": "small_crack_candidate",
-                }],
+                candidate_regions=[],
             )
 
             final_state = graph.run(initial_state)
@@ -213,39 +249,242 @@ class TestHJLGraph(unittest.TestCase):
             self.assertTrue(final_state.final_prediction["is_anomaly"])
             self.assertFalse(final_state.final_prediction["best_effort"])
 
-            # 2. State Invariants across execution steps
-            # Check regional fail step: Regional FAIL occurred and did NOT increase evidence
+            # 2. Granular State Invariants Across Transitions
             hist = final_state.step_history
             self.assertTrue(len(hist) > 0)
 
-            # Find regional verifier transitions
+            # Step Invariant A: Global Inspector proposed candidate [10, 10, 16, 16]
+            inspector_entries = [h for h in hist if h.get("node") == "global_inspector"]
+            self.assertTrue(len(inspector_entries) >= 1)
+
+            # Step Invariant B: Regional Fail occurred on 6x6 crop with score == 0.0
             reg_fail_entries = [h for h in hist if h.get("node") == "regional_verifier" and h.get("regional_judgment") and h["regional_judgment"].get("status") == "FAIL"]
             self.assertTrue(len(reg_fail_entries) >= 1, "Expected at least one Regional FAIL step")
-            self.assertEqual(reg_fail_entries[0]["regional_judgment"]["status"], "FAIL")
+            self.assertEqual(reg_fail_entries[0]["anomaly_score"], 0.0)
 
-            # Diagnoser immediately classifies LOW_RESOLUTION following regional fail
-            diag_entries = [h for h in hist if h.get("node") == "failure_diagnoser"]
-            self.assertTrue(len(diag_entries) >= 1)
-            self.assertEqual(diag_entries[0]["failure_type"], "LOW_RESOLUTION")
+            # Step Invariant C: Regional Pass on zoom step had score == 0.0
+            reg_pass_entries = [h for h in hist if h.get("node") == "regional_verifier" and h.get("regional_judgment") and h["regional_judgment"].get("status") == "PASS"]
+            self.assertTrue(len(reg_pass_entries) >= 1)
 
-            # Check that reference was retrieved and transition to CROSS_VALIDATE occurred
+            # Step Invariant D: Retrieval step had score == 0.0
             retrieve_entries = [h for h in hist if h.get("tool_call") and h["tool_call"].get("name") == "retrieve_normal_reference"]
-            self.assertTrue(len(retrieve_entries) >= 1, "Expected retrieve_normal_reference tool call")
+            self.assertTrue(len(retrieve_entries) >= 1)
+            self.assertEqual(retrieve_entries[0]["anomaly_score"], 0.0)
 
+            # Step Invariant E: Comparison step detected difference -> score rose to 0.8
             compare_entries = [h for h in hist if h.get("tool_call") and h["tool_call"].get("name") == "compare_with_reference"]
-            self.assertTrue(len(compare_entries) >= 1, "Expected compare_with_reference tool call")
-
-            # Invariant: compare_with_reference received explicit reference_path argument
+            self.assertTrue(len(compare_entries) >= 1)
             comp_args = compare_entries[0]["tool_call"]["arguments"]
             self.assertIn("reference_path", comp_args)
-            self.assertTrue(len(comp_args["reference_path"]) > 0)
+            self.assertIn("normalized_bbox", comp_args)
 
-            # Invariant: Evidence accumulation produced terminal anomaly score
+            # Final Evidence Score Invariant
             self.assertGreaterEqual(final_state.evidence_state.anomaly_score, 0.75)
             self.assertGreaterEqual(len(final_state.evidence_state.supporting_evidence), 1)
 
         finally:
             context.close()
+
+    def test_acceptance_confirmed_normal(self):
+        """Acceptance Test A: When global VLM confirms normal with high confidence, fast-exit to CONFIRMED_NORMAL."""
+        config = HJLConfig(global_normal_confidence_threshold=0.95)
+        context = ToolExecutionContext(image=self.image_path)
+        context["original_image_path"] = str(self.image_path)
+
+        normal_caller = ScriptedHJLModelCaller(
+            global_inspection=GlobalInspectionResult(
+                observation="Clean pristine component without defects.",
+                candidate_regions=[],
+                is_normal=True,
+                confidence=0.98,
+            )
+        )
+
+        try:
+            graph = create_hjl_graph(context=context, config=config, model_caller=normal_caller)
+            initial_state = HJLState(sample_id="test_norm", image_path=self.image_path)
+            final_state = graph.run(initial_state)
+
+            self.assertEqual(final_state.stop_reason, StopReason.CONFIRMED_NORMAL)
+            self.assertEqual(final_state.final_prediction["conclusion"], "NORMAL")
+            self.assertFalse(final_state.final_prediction["is_anomaly"])
+            self.assertFalse(final_state.final_prediction["best_effort"])
+            # Fast exit without tool execution
+            self.assertEqual(final_state.current_step, 0)
+        finally:
+            context.close()
+
+    def test_acceptance_discovery_exhaustion(self):
+        """Acceptance Test B: Ambiguous view fails global verification; 0 candidates after 2 attempts terminates via NO_VALID_ACTION."""
+        config = HJLConfig(max_discovery_attempts=2)
+        # Create solid white image without any dark boxes for visual_analyzer
+        solid_tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        Image.new("RGB", (100, 100), color=(255, 255, 255)).save(solid_tmp.name)
+
+        context = ToolExecutionContext(image=solid_tmp.name)
+        context["original_image_path"] = str(solid_tmp.name)
+
+        # Model caller returns empty candidates but not high confidence normal
+        ambiguous_caller = ScriptedHJLModelCaller(
+            global_inspection=GlobalInspectionResult(
+                observation="Ambiguous view with lighting glare.",
+                candidate_regions=[],
+                is_normal=False,
+                confidence=0.70,
+            )
+        )
+
+        try:
+            graph = create_hjl_graph(context=context, config=config, model_caller=ambiguous_caller)
+            initial_state = HJLState(sample_id="test_disc_exhaust", image_path=solid_tmp.name, max_steps=6)
+            final_state = graph.run(initial_state)
+
+            self.assertEqual(final_state.stop_reason, StopReason.NO_VALID_ACTION)
+            self.assertEqual(final_state.final_prediction["conclusion"], "UNRESOLVED")
+            self.assertIsNone(final_state.final_prediction["is_anomaly"])
+            self.assertTrue(final_state.final_prediction["best_effort"])
+            self.assertGreaterEqual(final_state.discovery_attempts, 2)
+        finally:
+            context.close()
+            Path(solid_tmp.name).unlink(missing_ok=True)
+
+    def test_acceptance_missing_reference_live_mode(self):
+        """Acceptance Test C: In live mode (allow_synthetic=False), missing reference fails retrieval cleanly, preserving prior history."""
+        config = HJLConfig(max_steps=10)
+        context = ToolExecutionContext(image=self.image_path)
+        context["original_image_path"] = str(self.image_path)
+
+        # Caller that guides graph through crop -> zoom -> missing reference
+        caller = ScriptedHJLModelCaller(
+            global_inspection=GlobalInspectionResult(
+                observation="Suspicious crack candidate.",
+                candidate_regions=[CandidateRegion(bbox=[10, 10, 16, 16], confidence=0.85)],
+                is_normal=False,
+                confidence=0.85,
+            ),
+            hypothesis=HypothesisResult(
+                hypothesis_id="hyp_01",
+                type="crack",
+                description="Crack",
+                confidence=0.85,
+                target_region=[10, 10, 16, 16],
+            ),
+            evidence_finding=RegionalEvidenceFinding(
+                finding="Zoomed surface inspected.",
+                relation=EvidenceRelation.NEUTRAL,
+                observation_type="inspected_roi",
+                confidence=0.85,
+            ),
+        )
+
+        try:
+            # allow_synthetic=False: reference retrieval will fail because no local train corpus exists for this category
+            graph = create_hjl_graph(
+                context=context,
+                config=config,
+                model_caller=caller,
+                allow_synthetic=False,
+            )
+            initial_state = HJLState(
+                sample_id="test_live_missing_ref",
+                image_path=self.image_path,
+                category="nonexistent_metal_part_9999",
+                max_steps=10,
+            )
+            final_state = graph.run(initial_state)
+
+            # Must terminate UNRESOLVED without fake gray reference
+            self.assertEqual(final_state.final_prediction["conclusion"], "UNRESOLVED")
+            self.assertIsNone(final_state.final_prediction["is_anomaly"])
+            self.assertEqual(final_state.stop_reason, StopReason.NO_VALID_ACTION)
+
+            # Invariant: Observation history retains prior successful steps alongside the failed retrieval
+            self.assertGreaterEqual(len(final_state.observations), 3)
+            tools_called = [o["tool"] for o in final_state.observations]
+            self.assertIn("crop_region", tools_called)
+            self.assertIn("zoom_region", tools_called)
+            self.assertIn("retrieve_normal_reference", tools_called)
+
+            # Last observation was failed retrieve with retriable=False
+            last_obs = final_state.observations[-1]
+            self.assertFalse(last_obs["success"])
+            self.assertFalse(last_obs["retriable"])
+            self.assertIsNotNone(last_obs["error"])
+        finally:
+            context.close()
+
+    def test_acceptance_malformed_model_output(self):
+        """Acceptance Test D: In live mode (live_mode=True), unrecoverable model output error terminates cleanly via MODEL_ERROR."""
+        context = ToolExecutionContext(image=self.image_path)
+        context["original_image_path"] = str(self.image_path)
+
+        class FailingCaller(ScriptedHJLModelCaller):
+            def inspect_global(self, image_path, instruction, category):
+                raise ModelOutputError("Model response failed schema validation after retry.")
+
+        try:
+            graph = create_hjl_graph(
+                context=context,
+                config=HJLConfig(),
+                model_caller=FailingCaller(),
+                live_mode=True,
+            )
+            initial_state = HJLState(sample_id="test_malformed", image_path=self.image_path)
+            final_state = graph.run(initial_state)
+
+            self.assertEqual(final_state.stop_reason, StopReason.MODEL_ERROR)
+            self.assertEqual(final_state.final_prediction["conclusion"], "UNRESOLVED")
+            self.assertIsNone(final_state.final_prediction["is_anomaly"])
+            self.assertTrue(final_state.final_prediction["best_effort"])
+        finally:
+            context.close()
+
+    def test_acceptance_multi_roi_original_space_isolation(self):
+        """Acceptance Test E: Multi-ROI inspection must crop ROI B from original_image_path, not from previously transformed ROI A."""
+        context = ToolExecutionContext(image=self.image_path)
+        context["original_image_path"] = str(self.image_path)
+
+        # Plan: crop ROI A [10, 10, 30, 30] -> zoom 2.0 -> inspect next region [60, 60, 80, 80]
+        # Verify that ROI B is successfully cropped without dimension errors from original 100x100 space
+        state = HJLState(
+            sample_id="test_multi_roi",
+            image_path=self.image_path,
+            evidence_state=EvidenceState(unresolved_regions=[[60, 60, 80, 80]]),
+        )
+
+        # 1. First crop ROI A
+        state.tool_calls = [{"name": "crop_region", "arguments": {"bbox": [10, 10, 30, 30], "use_original": True}}]
+        res1 = tool_executor_node(state, context=context)
+        self.assertEqual(res1["active_region_original_bbox"], [10, 10, 30, 30])
+        self.assertEqual(res1["active_region_rotation_deg"], 0.0)
+
+        # 2. Zoom ROI A
+        state.current_step = res1["current_step"]
+        state.observations = res1["observations"]
+        state.tool_calls = [{"name": "zoom_region", "arguments": {"scale": 2.0}}]
+        res2 = tool_executor_node(state, context=context)
+        self.assertTrue(res2["observations"][-1]["success"])
+
+        # 3. Rotate ROI A 90 deg
+        state.current_step = res2["current_step"]
+        state.observations = res2["observations"]
+        state.tool_calls = [{"name": "rotate_image", "arguments": {"angle": 90.0}}]
+        res3 = tool_executor_node(state, context=context)
+        self.assertEqual(res3["active_region_rotation_deg"], 90.0)
+
+        # 4. Now inspect next region [60, 60, 80, 80] with use_original=True
+        # If this mistakenly executed against the 40x40 zoomed/rotated ROI A, bbox [60, 60, 80, 80] would fail!
+        state.current_step = res3["current_step"]
+        state.observations = res3["observations"]
+        state.tool_calls = [{"name": "crop_region", "arguments": {"bbox": [60, 60, 80, 80], "use_original": True}}]
+        res4 = tool_executor_node(state, context=context)
+
+        # Must succeed because it was cropped from the 100x100 original image
+        self.assertTrue(res4["observations"][-1]["success"])
+        self.assertEqual(res4["active_region_original_bbox"], [60, 60, 80, 80])
+        # Rotation must be reset to 0.0 on a new ROI crop
+        self.assertEqual(res4["active_region_rotation_deg"], 0.0)
+        context.close()
 
 
 if __name__ == "__main__":

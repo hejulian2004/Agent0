@@ -7,13 +7,15 @@ from typing import Any
 
 from PIL import Image
 
-from ..model_caller import CandidateRegion, HJLModelCaller
-from ..state import HJLState
+from ..model_caller import HJLModelCaller
+from ..schemas import CandidateRegion
+from ..state import HJLState, StopReason
 
 
 def global_inspector_node(
     state: HJLState,
     model_caller: HJLModelCaller | None = None,
+    live_mode: bool = False,
 ) -> dict[str, Any]:
     """Inspect the full global image and propose candidate suspicious regions without automatic bias."""
     image_path = Path(state.image_path)
@@ -21,6 +23,8 @@ def global_inspector_node(
         return {
             "global_observation": f"Image file not found: {image_path}",
             "candidate_regions": [],
+            "global_is_normal": False,
+            "global_confidence": 0.0,
         }
 
     try:
@@ -30,6 +34,8 @@ def global_inspector_node(
         return {
             "global_observation": f"Failed to open image: {exc}",
             "candidate_regions": [],
+            "global_is_normal": False,
+            "global_confidence": 0.0,
         }
 
     candidate_regions = list(state.candidate_regions)
@@ -59,8 +65,16 @@ def global_inspector_node(
                 "global_is_normal": res.is_normal,
                 "global_confidence": res.confidence,
             }
-        except Exception:
-            pass  # Fall back to heuristic inspection
+        except Exception as exc:
+            if live_mode:
+                return {
+                    "global_observation": f"Model inspection failed: {exc}",
+                    "candidate_regions": [],
+                    "global_is_normal": False,
+                    "global_confidence": 0.0,
+                    "stop_reason": StopReason.MODEL_ERROR,
+                }
+            # Fall back to offline heuristic only when not live_mode
 
     # 2. Offline / Heuristic inspection
     if not candidate_regions:

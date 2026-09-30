@@ -8,13 +8,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..model_caller import HJLModelCaller, RegionalEvidenceFinding
-from ..state import EvidenceRelation, HJLState
+from ..model_caller import HJLModelCaller
+from ..schemas import RegionalEvidenceFinding
+from ..state import EvidenceRelation, HJLState, StopReason
 
 
 def evidence_extractor_node(
     state: HJLState,
     model_caller: HJLModelCaller | None = None,
+    live_mode: bool = False,
 ) -> dict[str, Any]:
     """Extract factual visual finding from the latest verified regional observation."""
     if not state.observations:
@@ -24,19 +26,23 @@ def evidence_extractor_node(
     tool_name = latest_obs.get("tool", "")
     metadata = latest_obs.get("metadata", {})
 
-    # If model caller is available, request model extraction
+    inspection_image = latest_obs.get("output_path") or state.image_path
+
+    # If model caller is available, request model extraction on the transformed ROI
     if model_caller is not None:
         try:
             finding = model_caller.extract_regional_evidence(
-                image_path=state.image_path,
+                image_path=inspection_image,
                 observation=latest_obs,
                 active_hypothesis=state.active_hypothesis,
             )
             return {"extracted_finding": finding}
         except Exception:
-            pass  # Fall back to deterministic extraction
+            if live_mode:
+                return {"stop_reason": StopReason.MODEL_ERROR}
+            # Fall back to deterministic extraction in offline/mock mode
 
-    # Spatial transformation operations are NEUTRAL by default
+    # Spatial transformation operations are NEUTRAL by default at the tool level
     if tool_name in {"crop_region", "zoom_region", "rotate_image"}:
         finding = RegionalEvidenceFinding(
             finding=f"Acquired focused observation of ROI {metadata.get('bbox')} via {tool_name}.",
