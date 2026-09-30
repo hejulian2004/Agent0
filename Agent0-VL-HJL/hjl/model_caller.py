@@ -491,20 +491,23 @@ class ResponsesHJLModelCaller:
             "Decide next step. Return JSON with:\n"
             "- action: 'TOOL_CALL' or 'FINISH'\n"
             "- tool_name: tool name if TOOL_CALL\n"
-            "- tool_arguments: dict of arguments conforming to the tool's parameter schema\n"
+            "- tool_arguments: dict of arguments conforming to the tool's parameter schema if TOOL_CALL\n"
             "- final_answer: str if FINISH\n"
             "- is_anomaly: bool if FINISH\n"
-            "- confidence: float (0.0-1.0)"
+            "- confidence: float (0.0-1.0) if FINISH"
         )
 
         def _validate(data: dict[str, Any]) -> ReactDecisionResult:
             act_str = require_str(data, "action")
             act = ReactAction(act_str)
-            conf = require_float(data, "confidence", 0.0, 1.0)
 
             if act == ReactAction.TOOL_CALL:
                 tool_name = require_str(data, "tool_name")
                 tool_arguments = require_dict(data, "tool_arguments")
+                raw_conf = data.get("confidence")
+                conf = float(raw_conf) if raw_conf is not None else 0.5
+                if not (0.0 <= conf <= 1.0):
+                    conf = 0.5
                 return ReactDecisionResult(
                     action=act,
                     tool_name=tool_name,
@@ -512,6 +515,7 @@ class ResponsesHJLModelCaller:
                     confidence=conf,
                 )
             else:
+                conf = require_float(data, "confidence", 0.0, 1.0)
                 is_anom = require_bool(data, "is_anomaly")
                 final_answer = require_str(data, "final_answer")
                 return ReactDecisionResult(

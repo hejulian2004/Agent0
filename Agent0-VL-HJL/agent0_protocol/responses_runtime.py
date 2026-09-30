@@ -121,7 +121,7 @@ class ResponsesRuntime:
                 },
                 "strict": True,
             }
-            history: list[Any] = [{"role": "user", "content": "Call the capability probe, then use its result."}]
+            history: list[Any] = [{"role": "user", "content": "Call the capability probe in two consecutive rounds before giving your final answer."}]
             seen_ids: set[str] = set()
             for round_number in (1, 2):
                 response = self._create(
