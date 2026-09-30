@@ -64,18 +64,22 @@ class ResponsesAdapter:
             raise ProtocolError("expected a structured function_call_output")
         output_dict = dict(item["output"])
         img_url = image_url or output_dict.get("image_url")
-        if not img_url and output_dict.get("output_path"):
-            try:
-                from pathlib import Path
-                import base64
+        if not img_url:
+            path_val = output_dict.get("output_path") or (
+                output_dict.get("image_path") if "image_size" in output_dict else None
+            )
+            if path_val:
+                try:
+                    from pathlib import Path
+                    import base64
 
-                p = Path(output_dict["output_path"])
-                if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
-                    data = p.read_bytes()
-                    mime = "image/png" if p.suffix.lower() == ".png" else "image/jpeg"
-                    img_url = f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
-            except Exception:
-                pass
+                    p = Path(path_val)
+                    if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
+                        data = p.read_bytes()
+                        mime = "image/png" if p.suffix.lower() == ".png" else "image/jpeg"
+                        img_url = f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+                except Exception:
+                    pass
 
         if img_url:
             text_dict = {k: v for k, v in output_dict.items() if k not in {"image_url", "image_data"}}

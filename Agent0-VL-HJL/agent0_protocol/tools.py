@@ -10,6 +10,8 @@ import json
 import os
 import re
 import tempfile
+import time
+import uuid
 from collections.abc import MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,8 +25,20 @@ from .schema import ProtocolError
 Handler = Callable[[dict[str, Any], Mapping[str, Any]], dict[str, Any]]
 
 
+def _get_intermediate_image_dir() -> Path:
+    custom_dir = os.environ.get("AGENT0_INTERMEDIATE_IMAGE_DIR")
+    if custom_dir:
+        target = Path(custom_dir)
+        if not target.is_absolute():
+            target = (Path(__file__).resolve().parents[1] / target).resolve()
+    else:
+        target = (Path(__file__).resolve().parents[1] / "outputs" / "intermediate_images").resolve()
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
 class _ImageFileOwner:
-    """Track temporary input and transformed images for one trajectory."""
+    """Track intermediate transformed images for one trajectory without losing them."""
 
     def __init__(self) -> None:
         self.paths: set[str] = set()
@@ -33,14 +47,10 @@ class _ImageFileOwner:
         self.paths.add(str(path))
 
     def cleanup(self) -> None:
-        for value in self.paths:
-            try:
-                Path(value).unlink(missing_ok=True)
-            except OSError:
-                pass
+        # Intermediate images under outputs/intermediate_images/ are preserved on disk
         self.paths.clear()
 
-    def __del__(self) -> None:  # pragma: no cover - safety cleanup on exceptions
+    def __del__(self) -> None:  # pragma: no cover
         self.cleanup()
 
 
@@ -123,12 +133,6 @@ class ToolExecutionContext(dict[str, Any]):
 
         owned_at_checkpoint = checkpoint.get("owned_paths")
         if owned_at_checkpoint is not None:
-            discarded_paths = self._image_files.paths - owned_at_checkpoint
-            for p in discarded_paths:
-                try:
-                    Path(p).unlink(missing_ok=True)
-                except OSError:
-                    pass
             self._image_files.paths &= owned_at_checkpoint
 
     def restore_checkpoint(self) -> None:
@@ -172,9 +176,12 @@ def _image_suffix(mime: str | None = None, data: bytes = b"") -> str:
 def _write_temporary_image(data: bytes, mime: str | None = None) -> tuple[Path, bool]:
     if not data:
         raise ValueError("image input is empty")
-    with tempfile.NamedTemporaryFile(prefix="agent0-image-", suffix=_image_suffix(mime, data), delete=False) as output:
-        output.write(data)
-        return Path(output.name), True
+    target_dir = _get_intermediate_image_dir()
+    suffix = _image_suffix(mime, data)
+    filename = f"img_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}{suffix}"
+    path = target_dir / filename
+    path.write_bytes(data)
+    return path, True
 
 
 def _materialize_image(value: Any) -> tuple[Path, bool]:
@@ -329,19 +336,30 @@ def _current_image_path(context: Mapping[str, Any]) -> Path:
     return path
 
 
-def _save_as_current(image: Any, context: Mapping[str, Any]) -> None:
+def _get_image_source(arguments: Mapping[str, Any], context: Mapping[str, Any]) -> Path:
+    target = arguments.get("image_path")
+    if target:
+        path, owned = _materialize_image(target)
+        if owned and isinstance(context, ToolExecutionContext):
+            context._image_files.add(path)
+        return path
+    return _current_image_path(context)
+
+
+def _save_as_current(image: Any, context: Mapping[str, Any]) -> Path:
+    target_dir = _get_intermediate_image_dir()
+    filename = f"img_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}.png"
+    path = target_dir / filename
     try:
-        with tempfile.NamedTemporaryFile(prefix="agent0-image-", suffix=".png", delete=False) as output:
-            path = Path(output.name)
         image.save(path, format="PNG")
     except Exception:
-        if "path" in locals():
-            path.unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
         raise
     if isinstance(context, ToolExecutionContext):
         context.set_generated_image(path)
     elif isinstance(context, MutableMapping):
         context["current_image_path"] = str(path)
+    return path
 
 
 def _python_exec(arguments: dict[str, Any], context: Mapping[str, Any]) -> dict[str, Any]:
@@ -362,15 +380,20 @@ def _python_exec(arguments: dict[str, Any], context: Mapping[str, Any]) -> dict[
 def _crop_image(arguments: dict[str, Any], context: Mapping[str, Any]) -> dict[str, Any]:
     from PIL import Image
 
-    source = _current_image_path(context)
+    source = _get_image_source(arguments, context)
     bbox = arguments["bbox"]
     with Image.open(source) as image:
         if not (0 <= bbox[0] < bbox[2] <= image.width and 0 <= bbox[1] < bbox[3] <= image.height):
             raise ValueError("bbox is outside the image")
         cropped = image.crop(tuple(bbox))
-        _save_as_current(cropped, context)
+        out_path = _save_as_current(cropped, context)
         size = cropped.size
-    return {"success": True, "image_size": [size[0], size[1]]}
+    return {
+        "success": True,
+        "image_path": str(out_path),
+        "output_path": str(out_path),
+        "image_size": [size[0], size[1]],
+    }
 
 
 _OCR_ENGINE: Any = None
@@ -403,44 +426,57 @@ def _run_ocr(image_path: str) -> dict[str, Any]:
 
 
 def _ocr(arguments: dict[str, Any], context: Mapping[str, Any]) -> dict[str, Any]:
-    result = _run_ocr(str(_current_image_path(context)))
-    return {"success": True, **result}
+    source = _get_image_source(arguments, context)
+    result = _run_ocr(str(source))
+    return {"success": True, "image_path": str(source), **result}
 
 
 def _zoom_image(arguments: dict[str, Any], context: Mapping[str, Any]) -> dict[str, Any]:
     from PIL import Image
 
-    source = _current_image_path(context)
+    source = _get_image_source(arguments, context)
     scale = arguments["scale"]
     if not (0.1 <= scale <= 8.0):
         raise ValueError("scale must be between 0.1 and 8")
     with Image.open(source) as image:
         output_image = image.resize((max(1, round(image.width * scale)), max(1, round(image.height * scale))))
-        _save_as_current(output_image, context)
+        out_path = _save_as_current(output_image, context)
         size = output_image.size
         output_image.close()
-    return {"success": True, "image_size": [size[0], size[1]]}
+    return {
+        "success": True,
+        "image_path": str(out_path),
+        "output_path": str(out_path),
+        "image_size": [size[0], size[1]],
+    }
 
 
 def _rotate_image(arguments: dict[str, Any], context: Mapping[str, Any]) -> dict[str, Any]:
     from PIL import Image
 
+    source = _get_image_source(arguments, context)
     angle = arguments["angle"]
     if not (-360.0 <= angle <= 360.0):
         raise ValueError("angle must be between -360 and 360 degrees")
-    with Image.open(_current_image_path(context)) as image:
+    with Image.open(source) as image:
         output_image = image.rotate(angle, expand=True)
-        _save_as_current(output_image, context)
+        out_path = _save_as_current(output_image, context)
         width, height = output_image.size
         output_image.close()
-    return {"success": True, "image_size": [width, height]}
+    return {
+        "success": True,
+        "image_path": str(out_path),
+        "output_path": str(out_path),
+        "image_size": [width, height],
+    }
 
 
 def _visual_analyzer(arguments: dict[str, Any], context: Mapping[str, Any]) -> dict[str, Any]:
     import numpy as np
     from PIL import Image
 
-    with Image.open(_current_image_path(context)) as image:
+    source = _get_image_source(arguments, context)
+    with Image.open(source) as image:
         width, height = image.size
         array = np.asarray(image.convert("RGB"), dtype=np.float32)
     result: dict[str, Any] = {
@@ -453,19 +489,20 @@ def _visual_analyzer(arguments: dict[str, Any], context: Mapping[str, Any]) -> d
     gray = array.mean(axis=2)
     ys, xs = np.where(gray < float(gray.mean()))
     result["dark_bbox"] = [int(xs.min()), int(ys.min()), int(xs.max() + 1), int(ys.max() + 1)] if len(xs) else None
-    return {"success": True, "analysis": result}
+    return {"success": True, "image_path": str(source), "analysis": result}
 
 
 def _plot_parser(arguments: dict[str, Any], context: Mapping[str, Any]) -> dict[str, Any]:
     """Return chart text/locations; it deliberately does not invent plotted values."""
     from PIL import Image
 
-    image_path = _current_image_path(context)
-    with Image.open(image_path) as image:
+    source = _get_image_source(arguments, context)
+    with Image.open(source) as image:
         width, height = image.size
-    result = _run_ocr(str(image_path))
+    result = _run_ocr(str(source))
     return {
         "success": True,
+        "image_path": str(source),
         "image_size": {"width": width, "height": height},
         "labels": result["lines"],
     }
@@ -475,6 +512,7 @@ def _object_detector(arguments: dict[str, Any], context: Mapping[str, Any]) -> d
     global _DETECTOR
     from ultralytics import YOLO
 
+    source = _get_image_source(arguments, context)
     model_path = str(context.get("detector_model") or os.getenv("AGENT0_DETECTOR_MODEL", ".venv/models/yolo26n.pt"))
     model_file = Path(model_path)
     if not model_file.is_absolute():
@@ -491,7 +529,7 @@ def _object_detector(arguments: dict[str, Any], context: Mapping[str, Any]) -> d
     max_detections = int(context.get("detector_max_detections", os.getenv("AGENT0_DETECTOR_MAX_DETECTIONS", "100")))
     device = str(context.get("detector_device", os.getenv("AGENT0_DETECTOR_DEVICE", "cpu")))
     results = _DETECTOR.predict(
-        source=str(_current_image_path(context)), conf=confidence, max_det=max_detections,
+        source=str(source), conf=confidence, max_det=max_detections,
         device=device, verbose=False,
     )
     detections = []
@@ -503,7 +541,7 @@ def _object_detector(arguments: dict[str, Any], context: Mapping[str, Any]) -> d
             "confidence": round(float(box.conf.item()), 5),
             "bbox_xyxy": [round(float(value), 2) for value in box.xyxy[0].tolist()],
         })
-    return {"success": True, "model": model_file.name, "detections": detections}
+    return {"success": True, "image_path": str(source), "model": model_file.name, "detections": detections}
 
 
 def _retrieve(arguments: dict[str, Any], context: Mapping[str, Any]) -> dict[str, Any]:
@@ -563,6 +601,7 @@ def _default_registry() -> ToolRegistry:
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "image_path": {"type": "string"},
                     "bbox": {"type": "array", "items": {"type": "integer"}},
                 },
                 "required": ["bbox"],
@@ -580,6 +619,7 @@ def _default_registry() -> ToolRegistry:
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "image_path": {"type": "string"},
                     "scale": {"type": "number"},
                 },
                 "required": ["scale"],
@@ -596,7 +636,10 @@ def _default_registry() -> ToolRegistry:
             "description": "Rotate image by degrees angle.",
             "parameters": {
                 "type": "object",
-                "properties": {"angle": {"type": "number"}},
+                "properties": {
+                    "image_path": {"type": "string"},
+                    "angle": {"type": "number"},
+                },
                 "required": ["angle"],
                 "additionalProperties": False,
             },
@@ -611,7 +654,9 @@ def _default_registry() -> ToolRegistry:
             "description": "Extract text from image using OCR.",
             "parameters": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "image_path": {"type": "string"},
+                },
                 "required": [],
                 "additionalProperties": False,
             },
@@ -626,7 +671,9 @@ def _default_registry() -> ToolRegistry:
             "description": "Extract chart labels and coordinates.",
             "parameters": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "image_path": {"type": "string"},
+                },
                 "required": [],
                 "additionalProperties": False,
             },
@@ -641,7 +688,9 @@ def _default_registry() -> ToolRegistry:
             "description": "Analyze image dimensions, dominant colors, and bounds.",
             "parameters": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "image_path": {"type": "string"},
+                },
                 "required": [],
                 "additionalProperties": False,
             },
@@ -656,7 +705,9 @@ def _default_registry() -> ToolRegistry:
             "description": "Detect COCO objects in image.",
             "parameters": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "image_path": {"type": "string"},
+                },
                 "required": [],
                 "additionalProperties": False,
             },

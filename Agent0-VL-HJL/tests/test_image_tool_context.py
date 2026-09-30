@@ -50,11 +50,11 @@ def _tool_call(call_id: str, name: str, arguments: dict) -> dict:
     return {"type": "function_call", "call_id": call_id, "name": name, "arguments": arguments}
 
 
-def test_image_tools_chain_intermediate_images_and_hide_paths():
+def test_image_tools_support_image_path_and_return_path():
     registry = get_tool_registry()
     definitions = {tool["name"]: tool for tool in registry.definitions()}
     for name in ("crop_image", "zoom_image", "rotate_image", "ocr", "plot_parser", "visual_analyzer", "object_detector"):
-        assert "image_path" not in definitions[name]["parameters"]["properties"]
+        assert "image_path" in definitions[name]["parameters"]["properties"]
 
     context = ToolExecutionContext(image=Image.new("RGB", (8, 6), "red"))
     original_path = context["current_image_path"]
@@ -64,18 +64,36 @@ def test_image_tools_chain_intermediate_images_and_hide_paths():
             [_tool_call("crop_1", "crop_image", {"bbox": [0, 0, 3, 2]})],
             context,
         )
-        assert crop_result[0]["output"] == {"success": True, "image_size": [3, 2]}
+        assert crop_result[0]["output"]["success"] is True
+        assert crop_result[0]["output"]["image_size"] == [3, 2]
+        assert "image_path" in crop_result[0]["output"]
+        cropped_path = crop_result[0]["output"]["image_path"]
+        assert Path(cropped_path).is_file()
+        assert "outputs/intermediate_images" in cropped_path
         assert context["current_image_path"] != original_path
 
+        # Inspection returns the analyzed image path
         inspect_result = execute_call_batch(
             registry,
             [_tool_call("visual_1", "visual_analyzer", {})],
             context,
         )
         assert inspect_result[0]["output"]["analysis"]["size"] == [3, 2]
-        assert "image_path" not in inspect_result[0]["output"]
+        assert inspect_result[0]["output"]["image_path"] == cropped_path
+
+        # Explicitly passing image_path works
+        explicit_result = execute_call_batch(
+            registry,
+            [_tool_call("crop_2", "crop_image", {"image_path": str(original_path), "bbox": [0, 0, 2, 2]})],
+            context,
+        )
+        assert explicit_result[0]["output"]["success"] is True
+        assert explicit_result[0]["output"]["image_size"] == [2, 2]
+        assert Path(explicit_result[0]["output"]["image_path"]).is_file()
     finally:
         context.close()
+        # Intermediate images are persistent under outputs/intermediate_images/
+        assert Path(cropped_path).is_file()
 
 
 def test_responses_runtime_injects_input_image_and_carries_crop_forward():
@@ -144,10 +162,10 @@ def test_tool_execution_context_checkpoint_and_rollback():
         assert cropped_path != original_path
         assert Path(cropped_path).is_file()
 
-        # Rollback should restore original path and delete intermediate file
+        # Rollback should restore original path, and intermediate image is preserved on disk
         context.rollback(cp)
         assert context["current_image_path"] == original_path
-        assert not Path(cropped_path).exists()
+        assert Path(cropped_path).is_file()
         assert Path(original_path).is_file()
 
         # Subsequent inspection sees the original image dimensions
@@ -159,6 +177,7 @@ def test_tool_execution_context_checkpoint_and_rollback():
         assert res2[0]["output"]["analysis"]["size"] == [10, 8]
     finally:
         context.close()
+        assert Path(cropped_path).is_file()
 
 
 def test_tool_execution_context_stack_checkpoints():
@@ -179,13 +198,13 @@ def test_tool_execution_context_stack_checkpoints():
         # Roll back to step 1
         context.restore_checkpoint()
         assert context["current_image_path"] == step1_path
-        assert not Path(step2_path).exists()
+        assert Path(step2_path).is_file()
         assert Path(step1_path).is_file()
 
         # Roll back to original
         context.restore_checkpoint()
         assert context["current_image_path"] == orig_path
-        assert not Path(step1_path).exists()
+        assert Path(step1_path).is_file()
         assert Path(orig_path).is_file()
     finally:
         context.close()
@@ -215,7 +234,7 @@ def test_verifier_repair_function_with_image_rollback():
         )
         assert repair_id != "bad_crop"
         assert context["current_image_path"] != orig_path
-        assert not Path(bad_path).exists()
+        assert Path(bad_path).is_file()
 
         # Verify output of the repaired call
         repaired_output = trajectory.items[-1]["output"]

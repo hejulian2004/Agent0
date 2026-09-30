@@ -371,7 +371,7 @@ def execute_adapted_tool(
             error = out.get("error") if not success else None
             return ToolResult(
                 success=success,
-                output_path=out.get("output_path"),
+                output_path=out.get("image_path") or out.get("output_path"),
                 metadata=copy.deepcopy(out),
                 error=error,
                 retriable=_is_retriable_error(error),
