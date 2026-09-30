@@ -95,7 +95,7 @@ class HJLEngine:
         limit = max_steps or self.config.max_steps
         reg = get_tool_registry()
         tool_defs = [
-            t for t in get_hjl_tool_definitions()
+            t for t in get_hjl_tool_definitions(agent_visible=True)
             if t["name"] in self.config.enabled_tools
         ]
 
@@ -147,7 +147,16 @@ class HJLEngine:
                 continue
 
             checkpoint = context.checkpoint()
-            tool_args = decision.tool_arguments or {}
+            tool_args = copy.deepcopy(decision.tool_arguments or {})
+            if decision.tool_name == "retrieve_normal_reference":
+                if not tool_args.get("category"):
+                    tool_args["category"] = category
+                tool_args["allow_synthetic"] = self.mock
+                if self.config.reference_corpus_dir:
+                    tool_args["corpus_dir"] = self.config.reference_corpus_dir
+                else:
+                    tool_args.pop("corpus_dir", None)
+
             tool_result = execute_adapted_tool(
                 name=decision.tool_name,
                 arguments=tool_args,

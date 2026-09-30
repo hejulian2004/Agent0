@@ -128,6 +128,33 @@ class TestHJLBaselines(unittest.TestCase):
             if old_val is not None:
                 os.environ["AGENT0_RESPONSES_API_KEY"] = old_val
 
+    def test_react_runtime_injected_arguments_isolation(self):
+        """ReAct agent-visible tool schemas must omit allow_synthetic and corpus_dir, and runtime must inject them."""
+        from hjl.tools_adapter import get_hjl_tool_definitions
+
+        defs = get_hjl_tool_definitions(agent_visible=True)
+        ret_def = next(d for d in defs if d["name"] == "retrieve_normal_reference")
+        props = ret_def["parameters"]["properties"]
+        self.assertNotIn("allow_synthetic", props)
+        self.assertNotIn("corpus_dir", props)
+        self.assertIn("category", props)
+
+        class RetrieveCaller(MockHJLModelCaller):
+            def react_step(self, history, image_path, enabled_tools, *args, **kwargs):
+                if not history:
+                    return ReactDecisionResult(
+                        action=ReactAction.TOOL_CALL,
+                        tool_name="retrieve_normal_reference",
+                        tool_arguments={"category": "metal_casting"},
+                    )
+                return ReactDecisionResult(action=ReactAction.FINISH, is_anomaly=False, final_answer="Done")
+
+        engine = HJLEngine(model_caller=RetrieveCaller(), mock=True)
+        res = engine.run_react(self.image_path, max_steps=2)
+        ret_obs = res["observations"][0]
+        self.assertTrue(ret_obs["arguments"]["allow_synthetic"])
+        self.assertEqual(ret_obs["arguments"]["category"], "metal_casting")
+
 
 if __name__ == "__main__":
     unittest.main()

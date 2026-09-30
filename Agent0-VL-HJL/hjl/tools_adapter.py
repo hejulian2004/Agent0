@@ -158,9 +158,20 @@ HJL_TOOL_DEFINITIONS = [
 ]
 
 
-def get_hjl_tool_definitions() -> list[dict[str, Any]]:
-    """Return JSON schemas for all canonical HJL visual tools."""
-    return copy.deepcopy(HJL_TOOL_DEFINITIONS)
+def get_hjl_tool_definitions(*, agent_visible: bool = False) -> list[dict[str, Any]]:
+    """Return JSON schemas for all canonical HJL visual tools.
+
+    If agent_visible is True, strips runtime-injected arguments (corpus_dir, allow_synthetic)
+    so baseline agent models reason only over semantic action parameters.
+    """
+    defs = copy.deepcopy(HJL_TOOL_DEFINITIONS)
+    if agent_visible:
+        for t in defs:
+            if t["name"] == "retrieve_normal_reference":
+                props = t["parameters"]["properties"]
+                props.pop("corpus_dir", None)
+                props.pop("allow_synthetic", None)
+    return defs
 
 
 def _is_retriable_error(error: str | None) -> bool:
