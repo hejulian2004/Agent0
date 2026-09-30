@@ -53,12 +53,19 @@ def evidence_updater_node(
     tool_name = latest_obs.get("tool", "")
     metadata = latest_obs.get("metadata", {})
     step = latest_obs.get("step", state.current_step)
-    region = (
+    raw_region = (
         metadata.get("bbox")
         or (finding.metadata.get("bbox") if finding and finding.metadata else None)
         or (state.extracted_finding.metadata.get("bbox") if getattr(state, "extracted_finding", None) and state.extracted_finding.metadata else None)
         or state.active_region_original_bbox
     )
+    # Ensure region coordinates are strictly integer pixel coordinates [x1, y1, x2, y2]
+    region: list[int] | None = None
+    if raw_region is not None and isinstance(raw_region, (list, tuple)) and len(raw_region) == 4:
+        try:
+            region = [int(round(v)) for v in raw_region]
+        except (ValueError, TypeError):
+            region = None
 
     # 1. Determine finding attributes
     if finding is not None:

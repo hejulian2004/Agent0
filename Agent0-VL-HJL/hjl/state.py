@@ -51,9 +51,12 @@ __all__ = [
 
 @dataclass
 class EvidenceItem:
-    """Atomic persistent observation item."""
+    """Atomic persistent observation item.
+
+    Coordinates in `region` are strictly in original image pixel space [x1, y1, x2, y2].
+    """
     source_step: int
-    region: list[int] | None          # [x1, y1, x2, y2]
+    region: list[int] | None          # [x1, y1, x2, y2] in original image pixel space
     observation_type: str            # e.g., "texture_anomaly", "edge_crack", "reference_diff", "normal_feature"
     statement: str                   # Factual observation description
     relation: EvidenceRelation       # SUPPORT | CONTRADICT | NEUTRAL

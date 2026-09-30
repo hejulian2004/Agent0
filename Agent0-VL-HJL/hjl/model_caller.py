@@ -237,6 +237,12 @@ class ResponsesHJLModelCaller:
         raise ModelOutputError(f"Model call failed: {last_error}")
 
     def inspect_global(self, image_path: str, instruction: str, category: str) -> GlobalInspectionResult:
+        try:
+            with Image.open(image_path) as img:
+                img_w, img_h = img.size
+        except Exception:
+            img_w, img_h = None, None
+
         prompt = (
             f"You are an industrial visual anomaly inspector. Inspect this {category} image.\n"
             f"Instruction: {instruction}\n"
@@ -263,12 +269,46 @@ class ResponsesHJLModelCaller:
                 if len(raw_box) != 4 or not all(isinstance(v, (int, float)) for v in raw_box):
                     raise ValueError(f"candidate bbox must be a list of 4 numbers, got {raw_box}")
 
-                if "box_2d" in c and "bbox" not in c:
-                    y1, x1, y2, x2 = raw_box
-                    bbox = [int(min(x1, x2)), int(min(y1, y2)), int(max(x1, x2)), int(max(y1, y2))]
+                is_box_2d = ("box_2d" in c and "bbox" not in c)
+                c0, c1, c2, c3 = [float(v) for v in raw_box]
+
+                # Case 1: Normalized [0.0, 1.0] floats
+                if (
+                    img_w is not None
+                    and img_h is not None
+                    and all(0.0 <= v <= 1.0 for v in (c0, c1, c2, c3))
+                    and any(isinstance(v, float) and 0.0 < v < 1.0 for v in raw_box)
+                ):
+                    if is_box_2d:
+                        y1, x1, y2, x2 = c0 * img_h, c1 * img_w, c2 * img_h, c3 * img_w
+                    else:
+                        x1, y1, x2, y2 = c0 * img_w, c1 * img_h, c2 * img_w, c3 * img_h
+                # Case 2: box_2d scaled in [0, 1000] format (e.g. Gemini specification [ymin, xmin, ymax, xmax])
+                elif (
+                    is_box_2d
+                    and img_w is not None
+                    and img_h is not None
+                    and all(0 <= v <= 1000 for v in (c0, c1, c2, c3))
+                    and (img_w != 1000 or img_h != 1000)
+                ):
+                    y1, x1, y2, x2 = c0 * img_h / 1000.0, c1 * img_w / 1000.0, c2 * img_h / 1000.0, c3 * img_w / 1000.0
+                elif is_box_2d:
+                    y1, x1, y2, x2 = c0, c1, c2, c3
                 else:
-                    x1, y1, x2, y2 = raw_box
-                    bbox = [int(min(x1, x2)), int(min(y1, y2)), int(max(x1, x2)), int(max(y1, y2))]
+                    x1, y1, x2, y2 = c0, c1, c2, c3
+
+                if img_w is not None and img_h is not None:
+                    x_min = max(0, min(img_w, int(round(min(x1, x2)))))
+                    y_min = max(0, min(img_h, int(round(min(y1, y2)))))
+                    x_max = max(0, min(img_w, int(round(max(x1, x2)))))
+                    y_max = max(0, min(img_h, int(round(max(y1, y2)))))
+                else:
+                    x_min = int(round(min(x1, x2)))
+                    y_min = int(round(min(y1, y2)))
+                    x_max = int(round(max(x1, x2)))
+                    y_max = int(round(max(y1, y2)))
+
+                bbox = [x_min, y_min, x_max, y_max]
 
                 c_conf = require_float(c, "confidence", 0.0, 1.0)
                 label = c.get("label")

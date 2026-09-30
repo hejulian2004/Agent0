@@ -204,6 +204,52 @@ class TestHJLModelCaller(unittest.TestCase):
         self.assertTrue(res.is_anomaly)
         self.assertIn("react_step", caller.call_history)
 
+    def test_inspect_global_coordinate_normalization(self):
+        """ResponsesHJLModelCaller.inspect_global must accurately parse normalized floats, 0-1000 box_2d, and absolute pixels."""
+        import tempfile
+        from PIL import Image
+        from hjl.model_caller import ResponsesHJLModelCaller
+
+        with tempfile.NamedTemporaryFile(suffix=".png") as tmp:
+            Image.new("RGB", (900, 900), color=(128, 128, 128)).save(tmp.name)
+
+            class FakeResponsesCaller(ResponsesHJLModelCaller):
+                def __init__(self, raw_return: dict):
+                    self.raw_return = raw_return
+
+                def _call_and_validate(self, prompt, image_path, validator_fn):
+                    return validator_fn(self.raw_return)
+
+            # 1. Normalized [0.0, 1.0] floats
+            caller_norm = FakeResponsesCaller({
+                "observation": "Suspicious region",
+                "is_normal": False,
+                "confidence": 0.90,
+                "candidate_regions": [{"bbox": [0.1, 0.2, 0.5, 0.6], "confidence": 0.95}],
+            })
+            res_norm = caller_norm.inspect_global(tmp.name, "Inspect", "bottle")
+            self.assertEqual(res_norm.candidate_regions[0].bbox, [90, 180, 450, 540])
+
+            # 2. Gemini box_2d scaled [0, 1000] (ymin, xmin, ymax, xmax)
+            caller_box2d = FakeResponsesCaller({
+                "observation": "Suspicious region",
+                "is_normal": False,
+                "confidence": 0.90,
+                "candidate_regions": [{"box_2d": [200, 100, 600, 500], "confidence": 0.95}],
+            })
+            res_box2d = caller_box2d.inspect_global(tmp.name, "Inspect", "bottle")
+            self.assertEqual(res_box2d.candidate_regions[0].bbox, [90, 180, 450, 540])
+
+            # 3. Absolute pixel coordinates
+            caller_pixels = FakeResponsesCaller({
+                "observation": "Suspicious region",
+                "is_normal": False,
+                "confidence": 0.90,
+                "candidate_regions": [{"bbox": [100, 200, 500, 600], "confidence": 0.95}],
+            })
+            res_pixels = caller_pixels.inspect_global(tmp.name, "Inspect", "bottle")
+            self.assertEqual(res_pixels.candidate_regions[0].bbox, [100, 200, 500, 600])
+
 
 if __name__ == "__main__":
     unittest.main()
