@@ -11,6 +11,13 @@ from pathlib import Path
 
 from PIL import Image
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
+
 from .config import HJLConfig
 from .engine import HJLEngine
 from .trajectory import to_canonical_trajectory

@@ -12,6 +12,13 @@ from typing import Any
 
 import yaml
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+except ImportError:
+    pass
+
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "config.yaml"
 
@@ -50,18 +57,18 @@ def response_environment(config: dict[str, Any]) -> dict[str, str]:
     key_name = str(response.get("api_key_env", "AGENT0_RESPONSES_API_KEY"))
     api_key = env.get(key_name)
     if not api_key and not DRY_RUN:
-        raise SystemExit(f"Missing API key environment variable: {key_name}")
+        raise SystemExit(f"Missing API key environment variable: {key_name} (define in .env or environment)")
     values = {
-        "AGENT0_RESPONSES_BASE_URL": response.get("base_url"),
+        "AGENT0_RESPONSES_BASE_URL": env.get("AGENT0_RESPONSES_BASE_URL") or response.get("base_url"),
         "AGENT0_RESPONSES_API_KEY": api_key,
-        "AGENT0_RESPONSES_MODEL": response.get("model"),
-        "AGENT0_RESPONSES_TIMEOUT_SECONDS": response.get("timeout_seconds"),
-        "AGENT0_RESPONSES_MAX_RETRIES": response.get("max_retries"),
-        "AGENT0_RESPONSES_MAX_TOOL_ROUNDS": response.get("max_tool_rounds"),
-        "AGENT0_RESPONSES_MAX_OUTPUT_TOKENS": response.get("max_output_tokens"),
+        "AGENT0_RESPONSES_MODEL": env.get("AGENT0_RESPONSES_MODEL") or response.get("model"),
+        "AGENT0_RESPONSES_TIMEOUT_SECONDS": env.get("AGENT0_RESPONSES_TIMEOUT_SECONDS") or response.get("timeout_seconds"),
+        "AGENT0_RESPONSES_MAX_RETRIES": env.get("AGENT0_RESPONSES_MAX_RETRIES") or response.get("max_retries"),
+        "AGENT0_RESPONSES_MAX_TOOL_ROUNDS": env.get("AGENT0_RESPONSES_MAX_TOOL_ROUNDS") or response.get("max_tool_rounds"),
+        "AGENT0_RESPONSES_MAX_OUTPUT_TOKENS": env.get("AGENT0_RESPONSES_MAX_OUTPUT_TOKENS") or response.get("max_output_tokens"),
     }
     if not values["AGENT0_RESPONSES_MODEL"] and not DRY_RUN:
-        raise SystemExit("Set responses.model in config.yaml to the target endpoint model")
+        raise SystemExit("Set AGENT0_RESPONSES_MODEL in .env or responses.model in config.yaml to the target endpoint model")
     env.update({key: str(value) for key, value in values.items() if value is not None})
     return env
 
