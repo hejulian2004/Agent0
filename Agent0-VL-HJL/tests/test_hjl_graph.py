@@ -626,6 +626,43 @@ class TestHJLGraph(unittest.TestCase):
         finally:
             context.close()
 
+    def test_acceptance_localize_candidate_timeout_triggers_retry_tool(self):
+        """When localize_candidate experiences a transient timeout, tool_executor classifies it as retriable and routes to RETRY_TOOL."""
+        from unittest.mock import patch
+        from agent0_protocol.tools import ToolRegistry
+
+        mock_reg = ToolRegistry()
+        mock_reg.register(
+            {
+                "type": "function",
+                "name": "visual_analyzer",
+                "description": "Mock analyzer",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+                "strict": True,
+            },
+            lambda args, ctx: {"success": False, "error": "TimeoutError: visual_analyzer timed out after 30s"},
+        )
+
+        context = ToolExecutionContext(image=self.image_path)
+        context["original_image_path"] = str(self.image_path)
+
+        state = HJLState(
+            sample_id="test_timeout_retry",
+            image_path=self.image_path,
+            tool_calls=[{"name": "localize_candidate", "arguments": {"use_original": True}}],
+        )
+
+        with patch("hjl.nodes.tool_executor.get_tool_registry", return_value=mock_reg):
+            res = tool_executor_node(state, context=context)
+
+        self.assertEqual(res["failure_type"], FailureType.TOOL_FAILURE)
+        self.assertIn(ActionType.RETRY_TOOL, res["allowed_actions"])
+        self.assertEqual(res["selected_action"], ActionType.RETRY_TOOL)
+        self.assertIsNotNone(res["last_failed_tool_call"])
+        self.assertEqual(res["last_failed_tool_call"]["name"], "localize_candidate")
+        self.assertTrue(res["observations"][-1]["retriable"])
+        context.close()
+
 
 if __name__ == "__main__":
     unittest.main()

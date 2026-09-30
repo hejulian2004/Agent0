@@ -594,11 +594,18 @@ def execute_adapted_tool(
                 "arguments": {},
             }
             output = reg.execute(call, analysis_context)
+            if not output.get("success"):
+                err = output.get("error", "visual_analyzer failed")
+                return ToolResult(
+                    success=False,
+                    error=err,
+                    retriable=_is_retriable_error(err),
+                )
+
             candidates = []
-            if output.get("success"):
-                dark_box = output.get("analysis", {}).get("dark_bbox")
-                if dark_box:
-                    candidates.append({"bbox": dark_box, "confidence": 0.85, "label": "salient_region"})
+            dark_box = output.get("analysis", {}).get("dark_bbox")
+            if dark_box:
+                candidates.append({"bbox": dark_box, "confidence": 0.85, "label": "salient_region"})
 
             current_path = _current_image_path(context)
             return ToolResult(

@@ -21,7 +21,7 @@ from .model_caller import (
     ResponsesHJLModelCaller,
 )
 from .state import HJLState
-from .tools_adapter import execute_adapted_tool
+from .tools_adapter import execute_adapted_tool, get_hjl_tool_definitions
 from .trajectory import append_trajectory_step
 
 logger = logging.getLogger(__name__)
@@ -94,6 +94,10 @@ class HJLEngine:
         history: list[dict[str, Any]] = []
         limit = max_steps or self.config.max_steps
         reg = get_tool_registry()
+        tool_defs = [
+            t for t in get_hjl_tool_definitions()
+            if t["name"] in self.config.enabled_tools
+        ]
 
         for step in range(1, limit + 1):
             current_image = _current_image_path(context)
@@ -103,6 +107,7 @@ class HJLEngine:
                 enabled_tools=self.config.enabled_tools,
                 instruction=instruction,
                 category=category,
+                tool_definitions=tool_defs,
             )
 
             if decision.action == ReactAction.FINISH:

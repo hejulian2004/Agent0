@@ -129,6 +129,7 @@ class HJLModelCaller(Protocol):
         enabled_tools: list[str],
         instruction: str = "Inspect this component for defects using tools.",
         category: str = "industrial_component",
+        tool_definitions: list[dict[str, Any]] | None = None,
     ) -> ReactDecisionResult: ...
 
     def generic_verify_react(
@@ -296,19 +297,31 @@ class ResponsesHJLModelCaller:
         return self._call_and_validate(prompt, image_path, _validate)
 
     def verify_regional(self, observation: dict[str, Any], image_path: str) -> RegionalVerificationResult:
-        metadata = observation.get("metadata", {})
-        size = metadata.get("image_size")
-        if size and (size[0] < 12 or size[1] < 12):
-            return RegionalVerificationResult(
-                status=RegionalStatus.FAIL,
-                judgment_confidence=0.85,
-                reason=f"ROI resolution [{size[0]}x{size[1]}] is insufficient (<12px).",
-            )
-        return RegionalVerificationResult(
-            status=RegionalStatus.PASS,
-            judgment_confidence=0.90,
-            reason="ROI is sharp and feature-relevant.",
+        tool_name = observation.get("tool", "")
+        meta = observation.get("metadata", {})
+        prompt = (
+            f"You are an industrial visual inspection verifier evaluating a regional observation produced by {tool_name}.\n"
+            f"Observation metadata: {json.dumps(meta, ensure_ascii=False)}\n"
+            "Evaluate ONLY ROI quality, resolution, sharpness, and relevance to the visual inspection target.\n"
+            "Do NOT classify whether an anomaly exists.\n"
+            "Return JSON with:\n"
+            "- status: 'PASS' (ROI is sharp, sufficiently resolved, and informative) or 'FAIL' (ROI is blurry, corrupted, uninformative, or misses target structure)\n"
+            "- judgment_confidence: float between 0.0 and 1.0\n"
+            "- reason: concise explanation of the visual quality judgment"
         )
+
+        def _validate(data: dict[str, Any]) -> RegionalVerificationResult:
+            status_str = require_str(data, "status")
+            status = RegionalStatus(status_str)
+            conf = require_float(data, "judgment_confidence", 0.0, 1.0)
+            reason = require_str(data, "reason")
+            return RegionalVerificationResult(
+                status=status,
+                judgment_confidence=conf,
+                reason=reason,
+            )
+
+        return self._call_and_validate(prompt, image_path, _validate)
 
     def extract_regional_evidence(
         self,
@@ -463,16 +476,22 @@ class ResponsesHJLModelCaller:
         enabled_tools: list[str],
         instruction: str = "Inspect this component for defects using tools.",
         category: str = "industrial_component",
+        tool_definitions: list[dict[str, Any]] | None = None,
     ) -> ReactDecisionResult:
+        tools_spec = (
+            json.dumps(tool_definitions, indent=2, ensure_ascii=False)
+            if tool_definitions
+            else json.dumps(enabled_tools, ensure_ascii=False)
+        )
         prompt = (
-            f"You are a ReAct agent inspecting a {category} component.\n"
-            f"Instruction: {instruction}\n"
-            f"Enabled tools: {enabled_tools}\n"
-            f"History: {json.dumps(history[-4:] if history else [])}\n"
+            f"You are a ReAct agent inspecting a {category} component for industrial visual anomalies.\n"
+            f"Instruction: {instruction}\n\n"
+            f"Available tools and parameter schemas:\n{tools_spec}\n\n"
+            f"History of previous steps:\n{json.dumps(history[-4:] if history else [], ensure_ascii=False)}\n\n"
             "Decide next step. Return JSON with:\n"
             "- action: 'TOOL_CALL' or 'FINISH'\n"
             "- tool_name: tool name if TOOL_CALL\n"
-            "- tool_arguments: dict of arguments if TOOL_CALL\n"
+            "- tool_arguments: dict of arguments conforming to the tool's parameter schema\n"
             "- final_answer: str if FINISH\n"
             "- is_anomaly: bool if FINISH\n"
             "- confidence: float (0.0-1.0)"
@@ -706,6 +725,7 @@ class MockHJLModelCaller:
         enabled_tools: list[str],
         instruction: str = "Inspect this component for defects using tools.",
         category: str = "industrial_component",
+        tool_definitions: list[dict[str, Any]] | None = None,
     ) -> ReactDecisionResult:
         self.call_history.append("react_step")
         if not history:
@@ -835,11 +855,14 @@ class ScriptedHJLModelCaller:
         enabled_tools: list[str],
         instruction: str = "Inspect this component for defects using tools.",
         category: str = "industrial_component",
+        tool_definitions: list[dict[str, Any]] | None = None,
     ) -> ReactDecisionResult:
         self.call_history.append("react_step")
         if self.scripted_react:
             return self.scripted_react
-        return MockHJLModelCaller().react_step(history, image_path, enabled_tools, instruction, category)
+        return MockHJLModelCaller().react_step(
+            history, image_path, enabled_tools, instruction, category, tool_definitions
+        )
 
     def generic_verify_react(
         self,

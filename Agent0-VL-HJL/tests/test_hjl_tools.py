@@ -209,6 +209,26 @@ class TestHJLTools(unittest.TestCase):
         self.assertFalse(_is_retriable_error("Reference image not found at /path"))
         self.assertFalse(_is_retriable_error(None))
 
+    def test_localize_candidate_propagates_visual_analyzer_failure(self):
+        """When visual_analyzer fails, localize_candidate must return success=False with retriable classification."""
+        from agent0_protocol.tools import ToolRegistry
+        mock_reg = ToolRegistry()
+        mock_reg.register(
+            {
+                "type": "function",
+                "name": "visual_analyzer",
+                "description": "Mock analyzer",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+                "strict": True,
+            },
+            lambda args, ctx: {"success": False, "error": "TimeoutError: visual_analyzer timed out after 30s"},
+        )
+
+        res = execute_adapted_tool("localize_candidate", {}, self.context, registry=mock_reg)
+        self.assertFalse(res.success)
+        self.assertTrue(res.retriable)
+        self.assertIn("TimeoutError", res.error or "")
+
 
 if __name__ == "__main__":
     unittest.main()
