@@ -43,10 +43,10 @@ _MAX_OUTPUT_BYTES = max(1024, int(os.getenv("SANDBOX_MAX_OUTPUT_BYTES", str(64 *
 _MAX_CONCURRENT_PROCESSES = max(1, int(os.getenv("SANDBOX_MAX_CONCURRENT_PROCESSES", "1")))
 _IMPORT_STATEMENTS = {
     "math": "import math",
-    "numpy": "import numpy as np",
+    "numpy": "import numpy as np\nimport sys; sys.modules['np'] = np",
     "pillow": "from PIL import Image",
     "opencv": "import cv2",
-    "sympy": "import sympy as sp",
+    "sympy": "import sympy as sp\nimport sys; sys.modules['sp'] = sp",
     "rapidocr": "from rapidocr import RapidOCR",
 }
 

@@ -4,6 +4,9 @@
 /outputs/
 /evaluation_results/
 wandb/
+models/
+*.pt
+*.pth
 
 # Python cache
 .venv

@@ -480,7 +480,11 @@ def _object_detector(arguments: dict[str, Any], context: Mapping[str, Any]) -> d
     if not model_file.is_absolute():
         model_file = Path(__file__).resolve().parents[1] / model_file
     if not model_file.is_file():
-        raise FileNotFoundError(f"detector model weights not found: {model_file}")
+        alt = Path(__file__).resolve().parents[1] / "models" / model_file.name
+        if alt.is_file():
+            model_file = alt
+        else:
+            raise FileNotFoundError(f"detector model weights not found: {model_file}")
     if _DETECTOR is None:
         _DETECTOR = YOLO(str(model_file))
     confidence = float(context.get("detector_confidence", os.getenv("AGENT0_DETECTOR_CONFIDENCE", "0.25")))
