@@ -47,6 +47,7 @@ from hjl.taxonomy import (
 )
 
 
+@unittest.skip("Skipped while HJL tools are deregistered for general Agent0-VL")
 class TestHJLGraph(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)

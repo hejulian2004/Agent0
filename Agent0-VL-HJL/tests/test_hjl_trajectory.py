@@ -42,6 +42,7 @@ class TestHJLTrajectory(unittest.TestCase):
         self.assertEqual(data["selected_action"], "ENHANCE_REGION")
         self.assertEqual(data["anomaly_score"], 0.65)
 
+    @unittest.skip("Skipped while HJL tools are deregistered for general Agent0-VL")
     def test_to_canonical_trajectory_schema_conformance(self):
         state = HJLState(
             sample_id="s_canonical_test",

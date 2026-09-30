@@ -16,6 +16,7 @@ from hjl.tools_adapter import (
 )
 
 
+@unittest.skip("Skipped while HJL tools are deregistered for general Agent0-VL")
 class TestHJLTools(unittest.TestCase):
     def setUp(self):
         # Create a small dummy image for testing (60x40)

@@ -12,7 +12,7 @@ from hjl.config import HJLConfig
 class TestHJLConfig(unittest.TestCase):
     def test_default_config_values(self):
         config = HJLConfig()
-        self.assertTrue(config.enabled)
+        self.assertFalse(config.enabled)
         self.assertEqual(config.max_steps, 8)
         self.assertEqual(config.anomaly_threshold, 0.75)
         self.assertEqual(config.normal_threshold, 0.20)
@@ -20,8 +20,7 @@ class TestHJLConfig(unittest.TestCase):
         self.assertEqual(config.global_normal_confidence_threshold, 0.95)
         self.assertEqual(config.reference_similarity_threshold, 0.80)
         self.assertEqual(config.max_discovery_attempts, 2)
-        self.assertIn("crop_region", config.enabled_tools)
-        self.assertIn("zoom_region", config.enabled_tools)
+        self.assertEqual(config.enabled_tools, [])
 
     def test_config_from_yaml_file(self):
         yaml_content = """

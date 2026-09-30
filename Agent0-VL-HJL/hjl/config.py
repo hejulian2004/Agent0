@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 class HJLConfig:
     """Unified configuration for Hierarchical Judgment Loop."""
 
-    enabled: bool = True
+    enabled: bool = False
     max_steps: int = 8
     anomaly_threshold: float = 0.75
     normal_threshold: float = 0.20
@@ -33,12 +33,7 @@ class HJLConfig:
     tool_failure_limit: int = 3
     enabled_tools: list[str] = field(
         default_factory=lambda: [
-            "crop_region",
-            "zoom_region",
-            "rotate_image",
-            # "retrieve_normal_reference",
-            # "compare_with_reference",
-            "localize_candidate",
+            # All HJL tools are currently deregistered in favor of canonical Agent0-VL tools
         ]
     )
     trajectory_output_dir: str = "outputs/hjl_trajectories"

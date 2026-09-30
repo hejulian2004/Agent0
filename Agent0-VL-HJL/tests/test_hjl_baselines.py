@@ -19,6 +19,7 @@ from hjl.model_caller import (
 from hjl.state import HJLState
 
 
+@unittest.skip("Skipped while HJL tools are deregistered for general Agent0-VL")
 class TestHJLBaselines(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)

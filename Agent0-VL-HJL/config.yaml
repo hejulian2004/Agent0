@@ -414,9 +414,9 @@ qlora_smoke:
   max_train_records: 0
   resume_from: null
 
-# HJL (Hierarchical Judgment Loop) 配置
+# HJL (Hierarchical Judgment Loop) 配置 (当前聚焦通用 Agent0-VL，暂时停用 HJL 专属工具)
 hjl:
-  enabled: true
+  enabled: false
   max_steps: 8
   anomaly_threshold: 0.75
   normal_threshold: 0.20
@@ -429,12 +429,12 @@ hjl:
   failure_diagnosis: true
   adaptive_stop: true
   tool_failure_limit: 3
-  enabled_tools:
-    - crop_region
-    - zoom_region
-    - rotate_image
-    # - retrieve_normal_reference  # (针对工业异常检测的工具 - 暂时注释)
-    # - compare_with_reference     # (针对工业异常检测的工具 - 暂时注释)
-    - localize_candidate
+  enabled_tools: []
+    # - crop_region
+    # - zoom_region
+    # - rotate_image
+    # - retrieve_normal_reference
+    # - compare_with_reference
+    # - localize_candidate
   trajectory_output_dir: outputs/hjl_trajectories
 

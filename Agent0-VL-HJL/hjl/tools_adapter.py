@@ -20,69 +20,69 @@ from agent0_protocol.tools import (
     get_tool_registry,
 )
 
-HJL_TOOL_DEFINITIONS = [
-    {
-        "type": "function",
-        "name": "crop_region",
-        "description": "Crop a specific region of interest using [x1, y1, x2, y2] bounding box coordinates.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "bbox": {
-                    "type": "array",
-                    "items": {"type": "integer"},
-                    "description": "Bounding box coordinates [x1, y1, x2, y2]",
-                },
-                "use_original": {
-                    "type": "boolean",
-                    "description": "Whether to crop from the original full image rather than current crop",
-                },
-            },
-            "required": ["bbox"],
-            "additionalProperties": False,
-        },
-        "strict": True,
-    },
-    {
-        "type": "function",
-        "name": "zoom_region",
-        "description": "Resize and magnify the current inspection region by a positive scale factor.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "scale": {
-                    "type": "number",
-                    "description": "Scale magnification factor (> 0.0)",
-                },
-                "bbox": {
-                    "type": ["array", "null"],
-                    "items": {"type": "integer"},
-                    "description": "Associated original region bounding box",
-                },
-            },
-            "required": ["scale"],
-            "additionalProperties": False,
-        },
-        "strict": True,
-    },
-    {
-        "type": "function",
-        "name": "rotate_image",
-        "description": "Rotate the current visual inspection region by a specified angle in degrees.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "angle": {
-                    "type": "number",
-                    "description": "Rotation angle in degrees",
-                },
-            },
-            "required": ["angle"],
-            "additionalProperties": False,
-        },
-        "strict": True,
-    },
-    # --- Industrial Anomaly Detection Tools (Commented out for general Agent0-VL) ---
+# --- HJL Tool Definitions (Currently deregistered/commented out for general Agent0-VL) ---
+HJL_TOOL_DEFINITIONS: list[dict[str, Any]] = [
+    # {
+    #     "type": "function",
+    #     "name": "crop_region",
+    #     "description": "Crop a specific region of interest using [x1, y1, x2, y2] bounding box coordinates.",
+    #     "parameters": {
+    #         "type": "object",
+    #         "properties": {
+    #             "bbox": {
+    #                 "type": "array",
+    #                 "items": {"type": "integer"},
+    #                 "description": "Bounding box coordinates [x1, y1, x2, y2]",
+    #             },
+    #             "use_original": {
+    #                 "type": "boolean",
+    #                 "description": "Whether to crop from the original full image rather than current crop",
+    #             },
+    #         },
+    #         "required": ["bbox"],
+    #         "additionalProperties": False,
+    #     },
+    #     "strict": True,
+    # },
+    # {
+    #     "type": "function",
+    #     "name": "zoom_region",
+    #     "description": "Resize and magnify the current inspection region by a positive scale factor.",
+    #     "parameters": {
+    #         "type": "object",
+    #         "properties": {
+    #             "scale": {
+    #                 "type": "number",
+    #                 "description": "Scale magnification factor (> 0.0)",
+    #             },
+    #             "bbox": {
+    #                 "type": ["array", "null"],
+    #                 "items": {"type": "integer"},
+    #                 "description": "Associated original region bounding box",
+    #             },
+    #         },
+    #         "required": ["scale"],
+    #         "additionalProperties": False,
+    #     },
+    #     "strict": True,
+    # },
+    # {
+    #     "type": "function",
+    #     "name": "rotate_image",
+    #     "description": "Rotate the current visual inspection region by a specified angle in degrees.",
+    #     "parameters": {
+    #         "type": "object",
+    #         "properties": {
+    #             "angle": {
+    #                 "type": "number",
+    #                 "description": "Rotation angle in degrees",
+    #             },
+    #         },
+    #         "required": ["angle"],
+    #         "additionalProperties": False,
+    #     },
+    #     "strict": True,
+    # },
     # {
     #     "type": "function",
     #     "name": "retrieve_normal_reference",
@@ -139,23 +139,23 @@ HJL_TOOL_DEFINITIONS = [
     #     },
     #     "strict": True,
     # },
-    {
-        "type": "function",
-        "name": "localize_candidate",
-        "description": "Scan and propose suspicious defect candidate bounding box regions on the full image.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "use_original": {
-                    "type": "boolean",
-                    "description": "Whether to perform localization against original uncropped image",
-                },
-            },
-            "required": [],
-            "additionalProperties": False,
-        },
-        "strict": True,
-    },
+    # {
+    #     "type": "function",
+    #     "name": "localize_candidate",
+    #     "description": "Scan and propose suspicious defect candidate bounding box regions on the full image.",
+    #     "parameters": {
+    #         "type": "object",
+    #         "properties": {
+    #             "use_original": {
+    #                 "type": "boolean",
+    #                 "description": "Whether to perform localization against original uncropped image",
+    #             },
+    #         },
+    #         "required": [],
+    #         "additionalProperties": False,
+    #     },
+    #     "strict": True,
+    # },
 ]
 
 
@@ -364,7 +364,11 @@ def execute_adapted_tool(
     # 1. Unified JSON Schema validation against HJL_TOOL_DEFINITIONS
     tool_defs = {t["name"]: t for t in HJL_TOOL_DEFINITIONS}
     if name not in tool_defs:
-        return ToolResult(success=False, error=f"Unknown tool: {name}", retriable=False)
+        return ToolResult(
+            success=False,
+            error=f"HJL tool '{name}' is currently deregistered. Use canonical Agent0-VL tools instead.",
+            retriable=False,
+        )
 
     try:
         from jsonschema import Draft202012Validator
