@@ -8,6 +8,7 @@ import io
 import os
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlparse
 
@@ -190,9 +191,23 @@ class ResponsesRuntime:
                     trajectory.metadata["response_id"] = getattr(response, "id", None)
                     trajectory.validate()
                     return trajectory
-                for result in execute_call_batch(self.registry, calls, execution_context):
+                prev_img = execution_context.get("current_image_path")
+                batch_results = execute_call_batch(self.registry, calls, execution_context)
+                curr_img = execution_context.get("current_image_path")
+                image_changed = (curr_img != prev_img) and (curr_img is not None)
+
+                new_image_url: str | None = None
+                if image_changed and Path(curr_img).is_file():
+                    try:
+                        raw_bytes = Path(curr_img).read_bytes()
+                        new_image_url = f"data:image/png;base64,{base64.b64encode(raw_bytes).decode('ascii')}"
+                    except Exception:
+                        new_image_url = None
+
+                for idx, result in enumerate(batch_results):
+                    img_to_attach = new_image_url if (idx == len(batch_results) - 1 and new_image_url) else None
                     trajectory.append(result)
-                    history.append(self.adapter.function_result(result))
+                    history.append(self.adapter.function_result(result, image_url=img_to_attach))
             raise ProtocolError("Responses exceeded max_tool_rounds before a final message")
         finally:
             execution_context.close()

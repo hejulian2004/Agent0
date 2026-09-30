@@ -33,6 +33,7 @@ Token bookkeeping:
 
 import numpy as np
 import json
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Union
 
 from agent0_protocol.adapters import QwenModelAdapter
@@ -457,6 +458,16 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
                         continue
                     results = self._execute_calls(semantic_trajectories[g], calls, tool_contexts[g])
                     semantic_trajectories[g].validate()
+                    if tool_contexts[g]._image_changed and tool_contexts[g].get("current_image_path"):
+                        curr_p = Path(tool_contexts[g]["current_image_path"])
+                        if curr_p.is_file():
+                            try:
+                                from PIL import Image
+                                updated_img = Image.open(curr_p).convert("RGB").copy()
+                                if multi_modal_data is not None:
+                                    multi_modal_data[g] = {"image": [updated_img]}
+                            except Exception:
+                                pass
                     tool_success_by_g[g] = any(bool(item['output'].get('success')) for item in results)
                     tool_output_by_g[g] = json.dumps(results, ensure_ascii=False)
                     rendered = self.model_adapter.render(results, semantic_trajectories[g].tools, generate=True)
@@ -549,6 +560,16 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
                     for g, repair in regen_candidates:
                         if g in pre_tool_checkpoints:
                             tool_contexts[g].rollback(pre_tool_checkpoints[g])
+                            if tool_contexts[g].get("current_image_path"):
+                                curr_p = Path(tool_contexts[g]["current_image_path"])
+                                if curr_p.is_file():
+                                    try:
+                                        from PIL import Image
+                                        restored_img = Image.open(curr_p).convert("RGB").copy()
+                                        if multi_modal_data is not None:
+                                            multi_modal_data[g] = {"image": [restored_img]}
+                                    except Exception:
+                                        pass
 
                         regen_prompt_tokens = self._get_template_tokens(
                             "regenerate",
@@ -576,6 +597,16 @@ Switch back to the Solver role. Re-derive the corrected reasoning step applying 
                         regen_calls = [item for item in regen_items if item['type'] == 'function_call']
                         if regen_calls:
                             results = self._execute_calls(semantic_trajectories[g], regen_calls, tool_contexts[g])
+                            if tool_contexts[g]._image_changed and tool_contexts[g].get("current_image_path"):
+                                curr_p = Path(tool_contexts[g]["current_image_path"])
+                                if curr_p.is_file():
+                                    try:
+                                        from PIL import Image
+                                        updated_img = Image.open(curr_p).convert("RGB").copy()
+                                        if multi_modal_data is not None:
+                                            multi_modal_data[g] = {"image": [updated_img]}
+                                    except Exception:
+                                        pass
                             tool_success_by_g[g] = any(bool(item['output'].get('success')) for item in results)
                             tool_output_by_g[g] = json.dumps(results, ensure_ascii=False)
                             rendered = self.model_adapter.render(results, semantic_trajectories[g].tools, generate=True)

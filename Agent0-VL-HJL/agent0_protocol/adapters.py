@@ -50,13 +50,41 @@ class ResponsesAdapter:
         return items
 
     @staticmethod
-    def function_result(item: Mapping[str, Any]) -> dict[str, Any]:
+    def function_result(
+        item: Mapping[str, Any],
+        image_url: str | None = None,
+    ) -> dict[str, Any]:
         if item.get("type") != "function_call_output" or not isinstance(item.get("output"), dict):
             raise ProtocolError("expected a structured function_call_output")
+        output_dict = dict(item["output"])
+        img_url = image_url or output_dict.get("image_url")
+        if not img_url and output_dict.get("output_path"):
+            try:
+                from pathlib import Path
+                import base64
+
+                p = Path(output_dict["output_path"])
+                if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
+                    data = p.read_bytes()
+                    mime = "image/png" if p.suffix.lower() == ".png" else "image/jpeg"
+                    img_url = f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+            except Exception:
+                pass
+
+        if img_url:
+            text_dict = {k: v for k, v in output_dict.items() if k not in {"image_url", "image_data"}}
+            return {
+                "type": "function_call_output",
+                "call_id": item["call_id"],
+                "output": [
+                    {"type": "input_text", "text": json.dumps(text_dict, ensure_ascii=False)},
+                    {"type": "input_image", "image_url": img_url},
+                ],
+            }
         return {
             "type": "function_call_output",
             "call_id": item["call_id"],
-            "output": json.dumps(item["output"], ensure_ascii=False),
+            "output": json.dumps(output_dict, ensure_ascii=False),
         }
 
     @staticmethod

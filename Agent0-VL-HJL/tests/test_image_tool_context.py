@@ -101,6 +101,20 @@ def test_responses_runtime_injects_input_image_and_carries_crop_forward():
     assert [item["name"] for item in trajectory.items if item["type"] == "function_call"] == [
         "crop_image", "visual_analyzer"
     ]
+    # Check that crop_1 returned the newly transformed image to the model via input_image
+    crop_call_output = next(
+        item for item in fake.requests[1]["input"]
+        if isinstance(item, dict)
+        and item.get("type") == "function_call_output"
+        and item.get("call_id") == "crop_1"
+    )
+    assert isinstance(crop_call_output["output"], list)
+    types = [part["type"] for part in crop_call_output["output"]]
+    assert "input_text" in types
+    assert "input_image" in types
+    img_part = next(part for part in crop_call_output["output"] if part["type"] == "input_image")
+    assert img_part["image_url"].startswith("data:image/png;base64,")
+
     visual_call_output = next(
         item for item in fake.requests[2]["input"]
         if isinstance(item, dict)
