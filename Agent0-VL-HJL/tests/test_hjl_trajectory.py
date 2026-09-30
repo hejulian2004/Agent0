@@ -100,7 +100,7 @@ class TestHJLTrajectory(unittest.TestCase):
         state.observations.append({
             "step": 1,
             "tool": "retrieve_normal_reference",
-            "arguments": {"category": "metal_casting", "allow_synthetic": False},
+            "arguments": {"category": "metal_casting", "allow_synthetic": False, "corpus_dir": "/tmp/corpus"},
             "success": False,
             "output_path": None,
             "metadata": {},
@@ -115,12 +115,71 @@ class TestHJLTrajectory(unittest.TestCase):
         outputs = [it for it in traj.items if it.get("type") == "function_call_output"]
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["name"], "retrieve_normal_reference")
-        self.assertEqual(calls[0]["arguments"], {"category": "metal_casting", "allow_synthetic": False})
+        # In model-visible canonical trajectory, runtime arguments (category, allow_synthetic, corpus_dir) are stripped
+        self.assertEqual(calls[0]["arguments"], {})
+
+        # Verify state.observations was NOT mutated (retains full runtime audit arguments)
+        self.assertEqual(
+            state.observations[0]["arguments"],
+            {"category": "metal_casting", "allow_synthetic": False, "corpus_dir": "/tmp/corpus"},
+        )
 
         # Must faithfully record success=False and error
         self.assertFalse(outputs[0]["output"]["success"])
         self.assertEqual(outputs[0]["output"]["error"], "No train-normal reference available in reference corpus")
         self.assertFalse(outputs[0]["output"]["retriable"])
+
+    def test_to_canonical_trajectory_agent_visible_schemas_and_isolation(self):
+        """Canonical trajectory must use agent-visible tool schemas and isolate runtime arguments."""
+        state = HJLState(
+            sample_id="s_canonical_iso",
+            image_path="/tmp/fake.png",
+            stop_reason=StopReason.CONFIRMED_NORMAL,
+        )
+        state.observations.extend([
+            {
+                "step": 1,
+                "tool": "retrieve_normal_reference",
+                "arguments": {"category": "bottle", "allow_synthetic": False, "corpus_dir": "/data/corpus"},
+                "success": True,
+                "output_path": "/tmp/ref.png",
+                "metadata": {"split": "train", "is_normal": True},
+                "error": None,
+                "retriable": False,
+            },
+            {
+                "step": 2,
+                "tool": "crop_region",
+                "arguments": {"bbox": [5, 5, 25, 25], "use_original": True},
+                "success": True,
+                "output_path": "/tmp/crop.png",
+                "metadata": {"image_size": [20, 20]},
+                "error": None,
+                "retriable": False,
+            },
+        ])
+
+        traj = to_canonical_trajectory(state)
+        traj.validate()
+
+        # Verify tool schemas in canonical trajectory are agent-visible
+        ret_tool = next(t for t in traj.tools if t["name"] == "retrieve_normal_reference")
+        props = ret_tool["parameters"]["properties"]
+        self.assertEqual(props, {})
+        self.assertEqual(ret_tool["parameters"]["required"], [])
+
+        calls = [it for it in traj.items if it.get("type") == "function_call"]
+        self.assertEqual(len(calls), 2)
+        # retrieve_normal_reference function_call arguments stripped of runtime-only parameters
+        self.assertEqual(calls[0]["arguments"], {})
+        # crop_region retains model-semantic parameters
+        self.assertEqual(calls[1]["arguments"], {"bbox": [5, 5, 25, 25], "use_original": True})
+
+        # Verify state.observations still holds complete runtime execution arguments
+        self.assertEqual(
+            state.observations[0]["arguments"],
+            {"category": "bottle", "allow_synthetic": False, "corpus_dir": "/data/corpus"},
+        )
 
 
 if __name__ == "__main__":

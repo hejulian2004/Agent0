@@ -129,7 +129,7 @@ class TestHJLBaselines(unittest.TestCase):
                 os.environ["AGENT0_RESPONSES_API_KEY"] = old_val
 
     def test_react_runtime_injected_arguments_isolation(self):
-        """ReAct agent-visible tool schemas must omit allow_synthetic and corpus_dir, and runtime must inject them."""
+        """ReAct agent-visible tool schemas must omit allow_synthetic, corpus_dir, and category, and runtime must inject them."""
         from hjl.tools_adapter import get_hjl_tool_definitions
 
         defs = get_hjl_tool_definitions(agent_visible=True)
@@ -137,23 +137,43 @@ class TestHJLBaselines(unittest.TestCase):
         props = ret_def["parameters"]["properties"]
         self.assertNotIn("allow_synthetic", props)
         self.assertNotIn("corpus_dir", props)
-        self.assertIn("category", props)
+        self.assertNotIn("category", props)
+        self.assertEqual(props, {})
+        self.assertEqual(ret_def["parameters"]["required"], [])
 
-        class RetrieveCaller(MockHJLModelCaller):
+        # Verify Engine unconditionally overrides even if agent outputs a hallucinated category
+        class HallucinatingRetrieveCaller(MockHJLModelCaller):
             def react_step(self, history, image_path, enabled_tools, *args, **kwargs):
                 if not history:
                     return ReactDecisionResult(
                         action=ReactAction.TOOL_CALL,
                         tool_name="retrieve_normal_reference",
-                        tool_arguments={"category": "metal_casting"},
+                        tool_arguments={"category": "wrong_hallucinated_category"},
                     )
                 return ReactDecisionResult(action=ReactAction.FINISH, is_anomaly=False, final_answer="Done")
 
-        engine = HJLEngine(model_caller=RetrieveCaller(), mock=True)
-        res = engine.run_react(self.image_path, max_steps=2)
+        engine = HJLEngine(model_caller=HallucinatingRetrieveCaller(), mock=True)
+        res = engine.run_react(self.image_path, category="cable", max_steps=2)
         ret_obs = res["observations"][0]
         self.assertTrue(ret_obs["arguments"]["allow_synthetic"])
-        self.assertEqual(ret_obs["arguments"]["category"], "metal_casting")
+        self.assertEqual(ret_obs["arguments"]["category"], "cable")
+
+        # Verify Engine properly injects when agent outputs empty arguments {}
+        class CleanRetrieveCaller(MockHJLModelCaller):
+            def react_step(self, history, image_path, enabled_tools, *args, **kwargs):
+                if not history:
+                    return ReactDecisionResult(
+                        action=ReactAction.TOOL_CALL,
+                        tool_name="retrieve_normal_reference",
+                        tool_arguments={},
+                    )
+                return ReactDecisionResult(action=ReactAction.FINISH, is_anomaly=False, final_answer="Done")
+
+        engine_clean = HJLEngine(model_caller=CleanRetrieveCaller(), mock=True)
+        res_clean = engine_clean.run_react(self.image_path, category="metal_casting", max_steps=2)
+        ret_obs_clean = res_clean["observations"][0]
+        self.assertTrue(ret_obs_clean["arguments"]["allow_synthetic"])
+        self.assertEqual(ret_obs_clean["arguments"]["category"], "metal_casting")
 
 
 if __name__ == "__main__":

@@ -26,7 +26,7 @@ def append_trajectory_step(
 
 def to_canonical_trajectory(state: HJLState) -> CanonicalTrajectory:
     """Convert an HJLState and its observation history to a valid CanonicalTrajectory."""
-    tools = get_hjl_tool_definitions()
+    tools = get_hjl_tool_definitions(agent_visible=True)
 
     trajectory = CanonicalTrajectory(
         trajectory_id=f"traj_hjl_{state.sample_id}",
@@ -63,6 +63,11 @@ def to_canonical_trajectory(state: HJLState) -> CanonicalTrajectory:
         call_id = f"call_{state.sample_id}_{i+1}"
         tool_name = str(obs.get("tool", "crop_region"))
         raw_args = copy.deepcopy(obs.get("arguments", {}))
+
+        if tool_name == "retrieve_normal_reference":
+            raw_args.pop("allow_synthetic", None)
+            raw_args.pop("corpus_dir", None)
+            raw_args.pop("category", None)
 
         trajectory.append({
             "type": "function_call",

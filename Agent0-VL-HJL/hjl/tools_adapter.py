@@ -161,8 +161,8 @@ HJL_TOOL_DEFINITIONS = [
 def get_hjl_tool_definitions(*, agent_visible: bool = False) -> list[dict[str, Any]]:
     """Return JSON schemas for all canonical HJL visual tools.
 
-    If agent_visible is True, strips runtime-injected arguments (corpus_dir, allow_synthetic)
-    so baseline agent models reason only over semantic action parameters.
+    If agent_visible is True, strips runtime-injected arguments (corpus_dir, allow_synthetic, category)
+    so baseline agent models and canonical training trajectories reason only over semantic action parameters.
     """
     defs = copy.deepcopy(HJL_TOOL_DEFINITIONS)
     if agent_visible:
@@ -171,6 +171,8 @@ def get_hjl_tool_definitions(*, agent_visible: bool = False) -> list[dict[str, A
                 props = t["parameters"]["properties"]
                 props.pop("corpus_dir", None)
                 props.pop("allow_synthetic", None)
+                props.pop("category", None)
+                t["parameters"]["required"] = []
     return defs
 
 

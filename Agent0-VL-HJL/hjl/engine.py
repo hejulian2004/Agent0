@@ -149,8 +149,7 @@ class HJLEngine:
             checkpoint = context.checkpoint()
             tool_args = copy.deepcopy(decision.tool_arguments or {})
             if decision.tool_name == "retrieve_normal_reference":
-                if not tool_args.get("category"):
-                    tool_args["category"] = category
+                tool_args["category"] = category
                 tool_args["allow_synthetic"] = self.mock
                 if self.config.reference_corpus_dir:
                     tool_args["corpus_dir"] = self.config.reference_corpus_dir
