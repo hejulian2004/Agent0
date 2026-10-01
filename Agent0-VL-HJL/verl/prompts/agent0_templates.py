@@ -11,7 +11,8 @@ from tools.data_builder.schema import PROTOCOL_VERSION
 
 SOLVER_SYSTEM_PROMPT = (
     f"You are a vision-language reasoning agent under protocol {PROTOCOL_VERSION}.\n"
-    "Use only supplied function tools with JSON arguments. Ground each conclusion in observations.\n"
+    "Use supplied function tools with JSON arguments. Specify image_path when operating on specific images.\n"
+    "Transformed images return their new image_path and visual content. Ground conclusions in observations.\n"
     "Return a concise final answer once tools complete. Results are paired by call_id.\n"
 )
 

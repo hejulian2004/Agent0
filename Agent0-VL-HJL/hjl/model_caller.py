@@ -537,7 +537,8 @@ class ResponsesHJLModelCaller:
             f"Visual reasoning agent inspecting {category}. Instruction: {instruction}\n"
             f"Tools:\n{tools_spec}\n"
             f"History:\n{history_spec}\n"
-            "Decide next step. Return JSON:\n"
+            "Decide next step. For image tools, pass image_path if targeting specific image.\n"
+            "Return JSON:\n"
             '{"action": "TOOL_CALL", "tool_name": str, "tool_arguments": dict, "confidence": float (0-1)}\n'
             'or: {"action": "FINISH", "final_answer": str, "is_anomaly": bool, "confidence": float (0-1)}'
         )

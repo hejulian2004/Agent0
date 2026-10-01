@@ -597,7 +597,7 @@ def _default_registry() -> ToolRegistry:
         {
             "type": "function",
             "name": "crop_image",
-            "description": "Crop image to bbox [x1,y1,x2,y2].",
+            "description": "Crop image at image_path (or current image) to bbox [x1,y1,x2,y2]; returns new image_path.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -615,7 +615,7 @@ def _default_registry() -> ToolRegistry:
         {
             "type": "function",
             "name": "zoom_image",
-            "description": "Resize image by float scale factor.",
+            "description": "Resize image at image_path (or current image) by scale factor; returns new image_path.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -633,7 +633,7 @@ def _default_registry() -> ToolRegistry:
         {
             "type": "function",
             "name": "rotate_image",
-            "description": "Rotate image by degrees angle.",
+            "description": "Rotate image at image_path (or current image) by degrees angle; returns new image_path.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -651,7 +651,7 @@ def _default_registry() -> ToolRegistry:
         {
             "type": "function",
             "name": "ocr",
-            "description": "Extract text from image using OCR.",
+            "description": "Extract text from image at image_path (or current image) using OCR.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -668,7 +668,7 @@ def _default_registry() -> ToolRegistry:
         {
             "type": "function",
             "name": "plot_parser",
-            "description": "Extract chart labels and coordinates.",
+            "description": "Extract chart labels and coordinates from image at image_path (or current image).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -685,7 +685,7 @@ def _default_registry() -> ToolRegistry:
         {
             "type": "function",
             "name": "visual_analyzer",
-            "description": "Analyze image dimensions, dominant colors, and bounds.",
+            "description": "Analyze image dimensions, dominant colors, and bounds at image_path (or current image).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -702,7 +702,7 @@ def _default_registry() -> ToolRegistry:
         {
             "type": "function",
             "name": "object_detector",
-            "description": "Detect COCO objects in image.",
+            "description": "Detect COCO objects in image at image_path (or current image).",
             "parameters": {
                 "type": "object",
                 "properties": {
