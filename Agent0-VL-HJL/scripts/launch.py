@@ -191,9 +191,54 @@ def launch_qlora_smoke(config: dict[str, Any], extra: list[str]) -> int:
     return run(command + extra)
 
 
+def launch_serve_teacher(config: dict[str, Any], extra: list[str]) -> int:
+    sft_gen = config.get("sft_data_generation", {})
+    local_cfg = sft_gen.get("local_teacher", {})
+    serve_cfg = local_cfg.get("serve", {})
+    spec_cfg = local_cfg.get("speculative_decoding", {})
+
+    model = str(local_cfg.get("model") or "qwen3.8-27b")
+    host = str(serve_cfg.get("host") or "0.0.0.0")
+    port = str(serve_cfg.get("port") or "8000")
+    tp_size = str(serve_cfg.get("tensor_parallel_size") or config.get("runtime", {}).get("nproc_per_node", 4))
+    gpu_mem = str(serve_cfg.get("gpu_memory_utilization") or 0.85)
+    max_len = str(serve_cfg.get("max_model_len") or 32768)
+
+    command = [
+        python_executable(config), "-m", "vllm.entrypoints.openai.api_server",
+        "--model", model,
+        "--host", host,
+        "--port", port,
+        "--tensor-model-parallel-size", tp_size,
+        "--gpu-memory-utilization", gpu_mem,
+        "--max-model-len", max_len,
+        "--trust-remote-code",
+    ]
+
+    # Speculative Decoding parameters
+    if spec_cfg.get("enabled", True):
+        spec_model = spec_cfg.get("speculative_model")
+        if spec_model:
+            command.extend(["--speculative-model", str(spec_model)])
+        num_spec = spec_cfg.get("num_speculative_tokens")
+        if num_spec:
+            command.extend(["--num-speculative-tokens", str(num_spec)])
+        draft_tp = spec_cfg.get("speculative_draft_tensor_parallel_size")
+        if draft_tp:
+            command.extend(["--speculative-draft-tensor-parallel-size", str(draft_tp)])
+        spec_len = spec_cfg.get("speculative_max_model_len")
+        if spec_len:
+            command.extend(["--speculative-max-model-len", str(spec_len)])
+        disable_bs = spec_cfg.get("speculative_disable_by_batch_size")
+        if disable_bs:
+            command.extend(["--speculative-disable-by-batch-size", str(disable_bs)])
+
+    return run(command + extra)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("rl", "sft-stage1", "sft-stage2", "qlora-smoke", "evaluate", "probe", "build-data", "build-rl", "build-sft"))
+    parser.add_argument("action", choices=("rl", "sft-stage1", "sft-stage2", "qlora-smoke", "evaluate", "probe", "build-data", "build-rl", "build-sft", "serve-teacher"))
     parser.add_argument("--dry-run", action="store_true", help="print the resolved command without starting it")
     args, extra = parser.parse_known_args()
     if extra and extra[0] == "--":
@@ -202,6 +247,8 @@ def main() -> int:
     global DRY_RUN
     DRY_RUN = args.dry_run
 
+    if args.action == "serve-teacher":
+        return launch_serve_teacher(config, extra)
     if args.action == "build-sft":
         env = sandbox_environment(config)
         sft_gen = config.get("sft_data_generation", {})
@@ -229,6 +276,17 @@ def main() -> int:
             model = str(local_cfg.get("model") or "qwen3.8-27b")
             timeout = str(local_cfg.get("timeout_seconds") or 300)
             concurrency = str(local_cfg.get("concurrency") or 8)
+
+            # Speculative decoding environment variables
+            spec_cfg = local_cfg.get("speculative_decoding", {})
+            if spec_cfg.get("enabled"):
+                env["AGENT0_SPECULATIVE_ENABLED"] = "true"
+                if spec_cfg.get("speculative_model"):
+                    env["AGENT0_SPECULATIVE_MODEL"] = str(spec_cfg["speculative_model"])
+                if spec_cfg.get("num_speculative_tokens"):
+                    env["AGENT0_NUM_SPECULATIVE_TOKENS"] = str(spec_cfg["num_speculative_tokens"])
+                if spec_cfg.get("method"):
+                    env["AGENT0_SPECULATIVE_METHOD"] = str(spec_cfg["method"])
 
         env["AGENT0_RESPONSES_BASE_URL"] = env.get("AGENT0_RESPONSES_BASE_URL") or base_url
         env["AGENT0_RESPONSES_API_KEY"] = env.get("AGENT0_RESPONSES_API_KEY") or api_key

@@ -1120,6 +1120,12 @@ def main() -> int:
         help="Teacher model backend: 'local' (default, local Qwen 27B) or 'remote' (OpenAI/cloud API).",
     )
     parser.add_argument(
+        "--num-speculative-tokens",
+        type=int,
+        default=1,
+        help="Number of speculative tokens to predict per step (default: 1).",
+    )
+    parser.add_argument(
         "--concurrency", "-c",
         type=int,
         default=8,

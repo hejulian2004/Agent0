@@ -76,6 +76,10 @@ scripts/build_sft.sh --stage 1 --synthesize-count 100 --output-dir data/sft
 .venv/bin/python -m scripts.launch build-data
 .venv/bin/python -m scripts.launch build-rl
 
+# Serve Local Teacher Model with Speculative Decoding (1 token lookahead on 4x 4090)
+scripts/serve_teacher.sh
+.venv/bin/python -m scripts.launch serve-teacher
+
 # Standalone QLoRA smoke fine-tuning (requires configured paths in config.yaml)
 .venv/bin/python -m scripts.launch qlora-smoke
 ```
