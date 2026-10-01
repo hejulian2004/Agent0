@@ -38,7 +38,7 @@ uv pip sync --python .venv/bin/python --torch-backend=auto requirements.lock
 .venv/bin/python -m pytest tests/test_agent0_schema.py::test_schema_version_matches_dataset_protocol
 
 # Syntax and bytecode compilation check
-.venv/bin/python -m compileall -q agent0_protocol tools/data_builder verl
+.venv/bin/python -m compileall -q agent0_protocol tools/data_builder verl hjl scripts tests
 ```
 
 ### Unified Launcher (`scripts/launch.py` and Wrappers)
@@ -70,7 +70,9 @@ scripts/evaluate.sh
 .venv/bin/python -m hjl.run --image data/example.png --mode react
 .venv/bin/python -m hjl.run --image data/example.png --mode react_verifier
 
-# Data building (single-turn smoke builder and RL Parquet exporter)
+# Data building (SFT full trajectories, single-turn smoke builder, and RL Parquet exporter)
+scripts/build_sft.sh --stage 1 --synthesize-count 100 --output-dir data/sft
+.venv/bin/python -m scripts.launch build-sft
 .venv/bin/python -m scripts.launch build-data
 .venv/bin/python -m scripts.launch build-rl
 
