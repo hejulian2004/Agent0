@@ -1020,18 +1020,22 @@ def run_task_rollouts_concurrent(
     return completed_trajectories, stats
 
 
+class DummyTokenizer:
+    pad_token_id = 0
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        return list(text.encode("utf-8"))
+
+    def decode(self, tokens: list[int], skip_special_tokens: bool = False) -> str:
+        return bytes(tokens).decode("utf-8", errors="replace")
+
+    def convert_tokens_to_ids(self, token: str) -> int:
+        return {"<|im_end|>": 1, "<|endoftext|>": 2}.get(token, 0)
+
+
 def verify_sft_dataset_compatibility(dataset_path: Path) -> dict[str, Any]:
     """Verify that Agent0SFTDataset loads the generated dataset without error."""
     from verl.utils.dataset.agent0_sft_dataset import Agent0SFTDataset
-
-    class DummyTokenizer:
-        pad_token_id = 0
-        def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
-            return list(text.encode("utf-8"))
-        def decode(self, tokens: list[int], skip_special_tokens: bool = False) -> str:
-            return bytes(tokens).decode("utf-8", errors="replace")
-        def convert_tokens_to_ids(self, token: str) -> int:
-            return {"<|im_end|>": 1, "<|endoftext|>": 2}.get(token, 0)
 
     ds = Agent0SFTDataset(str(dataset_path), DummyTokenizer(), max_length=8192)
     sample = ds[0]
