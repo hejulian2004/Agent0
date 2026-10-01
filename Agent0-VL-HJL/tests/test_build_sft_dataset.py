@@ -220,3 +220,18 @@ def test_concurrent_task_rollout_runner(tmp_path):
     # Already completed tasks are skipped
     assert stats_resumed.attempted == 0
     assert len(trajectories_resumed) == 5
+
+
+def test_teacher_backend_selection_defaults(monkeypatch):
+    monkeypatch.delenv("AGENT0_RESPONSES_BASE_URL", raising=False)
+    monkeypatch.delenv("AGENT0_RESPONSES_MODEL", raising=False)
+    monkeypatch.delenv("AGENT0_RESPONSES_API_KEY", raising=False)
+
+    from scripts.build_sft_dataset import main
+    import sys
+
+    # Dry-run check for local default backend
+    test_args = ["scripts.build_sft_dataset", "--synthesize-count", "2", "--output-dir", "/tmp/test_sft_local", "--format", "jsonl"]
+    monkeypatch.setattr(sys, "argv", test_args)
+    res = main()
+    assert res == 0

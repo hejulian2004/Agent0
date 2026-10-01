@@ -1087,6 +1087,12 @@ def main() -> int:
         help="Ratio of samples allocated to training set (default: 0.9).",
     )
     parser.add_argument(
+        "--teacher-backend",
+        choices=["local", "remote"],
+        default="local",
+        help="Teacher model backend: 'local' (default, local Qwen 27B) or 'remote' (OpenAI/cloud API).",
+    )
+    parser.add_argument(
         "--concurrency", "-c",
         type=int,
         default=4,
@@ -1178,15 +1184,31 @@ def main() -> int:
                         pass
         logging.info(f"Loaded {len(tasks)} tasks from {tasks_path}")
 
-        teacher_url = args.teacher_base_url or os.environ.get("AGENT0_RESPONSES_BASE_URL", "http://localhost:8000/v1")
-        teacher_model = args.teacher_model or os.environ.get("AGENT0_RESPONSES_MODEL", "Qwen/Qwen2.5-VL-7B-Instruct")
-        teacher_key = args.teacher_api_key or os.environ.get("AGENT0_RESPONSES_API_KEY", "EMPTY")
+        if args.teacher_backend == "remote":
+            default_url = "https://api.openai.com/v1"
+            default_model = "gpt-4o"
+            default_key = os.environ.get("AGENT0_RESPONSES_API_KEY", "")
+            default_timeout = 180.0
+            default_concurrency = int(os.environ.get("AGENT0_CONCURRENCY", "8"))
+        else:
+            # Default: Local Qwen 27B teacher model
+            default_url = "http://127.0.0.1:8000/v1"
+            default_model = "qwen3.8-27b"
+            default_key = "EMPTY"
+            default_timeout = 300.0
+            default_concurrency = int(os.environ.get("AGENT0_CONCURRENCY", "4"))
+
+        teacher_url = args.teacher_base_url or os.environ.get("AGENT0_RESPONSES_BASE_URL") or default_url
+        teacher_model = args.teacher_model or os.environ.get("AGENT0_RESPONSES_MODEL") or default_model
+        teacher_key = args.teacher_api_key or os.environ.get("AGENT0_RESPONSES_API_KEY") or default_key
+        teacher_timeout = args.teacher_timeout if args.teacher_timeout != 180.0 else float(os.environ.get("AGENT0_RESPONSES_TIMEOUT_SECONDS", str(default_timeout)))
+        concurrency = args.concurrency if args.concurrency != 4 else default_concurrency
 
         cfg = ResponsesConfig(
             base_url=teacher_url,
             api_key=teacher_key,
             model=teacher_model,
-            timeout_seconds=args.teacher_timeout,
+            timeout_seconds=teacher_timeout,
             max_retries=3,
             max_tool_rounds=8,
             max_output_tokens=2048,
@@ -1198,7 +1220,7 @@ def main() -> int:
             runtime,
             builder,
             stream_jsonl,
-            concurrency=args.concurrency,
+            concurrency=concurrency,
             resume=args.resume,
             verify_semantics=not args.no_verify,
             min_steps=args.min_steps,

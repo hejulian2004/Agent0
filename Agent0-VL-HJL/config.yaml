@@ -86,6 +86,30 @@ data_export:
   output: data/smoke/responses/rl
   samples_per_dataset: 10
   allow_eval_only: false
+# SFT 轨迹数据集构建设置（支持使用本地 Qwen 27B 或远程 Responses 教师模型进行多轮工具推理与流式生成）。
+sft_data_generation:
+  output_dir: data/sft
+  stage: 1
+  concurrency: 4
+  train_ratio: 0.9
+  format: both # both | parquet | jsonl
+  min_steps: 3
+  # 教师模型后端选择：local (默认调用本地教师模型) | remote (可选调用远程 API)
+  backend: local
+  # 本地 Qwen 27B 教师模型端点（与本地 vLLM / SGLang OpenAI Responses API 对齐）
+  local_teacher:
+    base_url: http://127.0.0.1:8000/v1
+    model: qwen3.8-27b
+    api_key: EMPTY
+    timeout_seconds: 300
+    concurrency: 4
+  # 远程 Responses API 端点设置（可选，调用公网 OpenAI/云端模型）
+  remote_teacher:
+    base_url: https://api.openai.com/v1
+    model: gpt-4o
+    api_key_env: AGENT0_RESPONSES_API_KEY
+    timeout_seconds: 180
+    concurrency: 8
 # 基准评估所用数据目录、输出目录和批大小。
 evaluation:
   benchmarks: mathvista,mathverse,chartqa,arxivqa

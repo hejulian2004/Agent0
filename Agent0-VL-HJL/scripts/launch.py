@@ -203,8 +203,41 @@ def main() -> int:
     DRY_RUN = args.dry_run
 
     if args.action == "build-sft":
+        env = sandbox_environment(config)
+        sft_gen = config.get("sft_data_generation", {})
+        backend = str(sft_gen.get("backend", "local")).lower()
+
+        # Check if overridden by CLI extra arguments
+        if "--teacher-backend" in extra:
+            idx = extra.index("--teacher-backend")
+            if idx + 1 < len(extra):
+                backend = extra[idx + 1].lower()
+
+        if backend == "remote":
+            remote_cfg = sft_gen.get("remote_teacher", {})
+            key_name = str(remote_cfg.get("api_key_env", "AGENT0_RESPONSES_API_KEY"))
+            api_key = env.get(key_name) or os.environ.get("AGENT0_RESPONSES_API_KEY", "")
+            base_url = str(remote_cfg.get("base_url") or "https://api.openai.com/v1")
+            model = str(remote_cfg.get("model") or "gpt-4o")
+            timeout = str(remote_cfg.get("timeout_seconds") or 180)
+            concurrency = str(remote_cfg.get("concurrency") or 8)
+        else:
+            # Default: Local Qwen 27B teacher model
+            local_cfg = sft_gen.get("local_teacher", {})
+            api_key = str(local_cfg.get("api_key") or "EMPTY")
+            base_url = str(local_cfg.get("base_url") or "http://127.0.0.1:8000/v1")
+            model = str(local_cfg.get("model") or "qwen3.8-27b")
+            timeout = str(local_cfg.get("timeout_seconds") or 300)
+            concurrency = str(local_cfg.get("concurrency") or 4)
+
+        env["AGENT0_RESPONSES_BASE_URL"] = env.get("AGENT0_RESPONSES_BASE_URL") or base_url
+        env["AGENT0_RESPONSES_API_KEY"] = env.get("AGENT0_RESPONSES_API_KEY") or api_key
+        env["AGENT0_RESPONSES_MODEL"] = env.get("AGENT0_RESPONSES_MODEL") or model
+        env["AGENT0_RESPONSES_TIMEOUT_SECONDS"] = env.get("AGENT0_RESPONSES_TIMEOUT_SECONDS") or timeout
+        env["AGENT0_CONCURRENCY"] = env.get("AGENT0_CONCURRENCY") or concurrency
+
         command = [python_executable(config), "-m", "scripts.build_sft_dataset", *extra]
-        return run(command)
+        return run(command, env=env)
     if args.action == "rl":
         return launch_rl(config, extra)
     if args.action in {"sft-stage1", "sft-stage2"}:
