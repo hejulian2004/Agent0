@@ -193,7 +193,7 @@ def launch_qlora_smoke(config: dict[str, Any], extra: list[str]) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("rl", "sft-stage1", "sft-stage2", "qlora-smoke", "evaluate", "probe", "build-data", "build-rl"))
+    parser.add_argument("action", choices=("rl", "sft-stage1", "sft-stage2", "qlora-smoke", "evaluate", "probe", "build-data", "build-rl", "build-sft"))
     parser.add_argument("--dry-run", action="store_true", help="print the resolved command without starting it")
     args, extra = parser.parse_known_args()
     if extra and extra[0] == "--":
@@ -202,6 +202,9 @@ def main() -> int:
     global DRY_RUN
     DRY_RUN = args.dry_run
 
+    if args.action == "build-sft":
+        command = [python_executable(config), "-m", "scripts.build_sft_dataset", *extra]
+        return run(command)
     if args.action == "rl":
         return launch_rl(config, extra)
     if args.action in {"sft-stage1", "sft-stage2"}:
