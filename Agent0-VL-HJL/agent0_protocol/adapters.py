@@ -72,8 +72,9 @@ class ResponsesAdapter:
                 try:
                     from pathlib import Path
                     import base64
+                    from agent0_protocol.tools import _resolve_relative_path
 
-                    p = Path(path_val)
+                    p = _resolve_relative_path(path_val)
                     if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
                         data = p.read_bytes()
                         mime = "image/png" if p.suffix.lower() == ".png" else "image/jpeg"

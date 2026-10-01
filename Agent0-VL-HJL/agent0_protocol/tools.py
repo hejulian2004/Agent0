@@ -23,6 +23,29 @@ from .schema import ProtocolError
 
 
 Handler = Callable[[dict[str, Any], Mapping[str, Any]], dict[str, Any]]
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _to_relative_path(path: Path | str) -> str:
+    """Format path as a clean repo-relative path to avoid leaking local absolute paths."""
+    try:
+        p = Path(path)
+        if not p.is_absolute():
+            return str(p)
+        resolved = p.resolve()
+        if resolved.is_relative_to(PROJECT_ROOT):
+            return str(resolved.relative_to(PROJECT_ROOT))
+    except (ValueError, TypeError, OSError):
+        pass
+    return str(path)
+
+
+def _resolve_relative_path(path: Path | str) -> Path:
+    """Resolve repo-relative or absolute path to a concrete filesystem Path."""
+    p = Path(path)
+    if not p.is_absolute():
+        p = PROJECT_ROOT / p
+    return p.resolve()
 
 
 def _get_intermediate_image_dir() -> Path:
@@ -30,9 +53,9 @@ def _get_intermediate_image_dir() -> Path:
     if custom_dir:
         target = Path(custom_dir)
         if not target.is_absolute():
-            target = (Path(__file__).resolve().parents[1] / target).resolve()
+            target = (PROJECT_ROOT / target).resolve()
     else:
-        target = (Path(__file__).resolve().parents[1] / "outputs" / "intermediate_images").resolve()
+        target = (PROJECT_ROOT / "outputs" / "intermediate_images").resolve()
     target.mkdir(parents=True, exist_ok=True)
     return target
 
@@ -330,15 +353,17 @@ def _current_image_path(context: Mapping[str, Any]) -> Path:
     if not value:
         detail = context.get("current_image_error")
         raise ValueError(str(detail) if detail else "the current input image is unavailable")
-    path = Path(value)
+    path = _resolve_relative_path(value)
     if not path.is_file():
-        raise FileNotFoundError("the current image is no longer available")
+        raise FileNotFoundError(f"the current image is no longer available: {path}")
     return path
 
 
 def _get_image_source(arguments: Mapping[str, Any], context: Mapping[str, Any]) -> Path:
     target = arguments.get("image_path")
     if target:
+        if isinstance(target, (str, os.PathLike)) and not str(target).startswith("data:"):
+            target = _resolve_relative_path(target)
         path, owned = _materialize_image(target)
         if owned and isinstance(context, ToolExecutionContext):
             context._image_files.add(path)
@@ -346,20 +371,22 @@ def _get_image_source(arguments: Mapping[str, Any], context: Mapping[str, Any]) 
     return _current_image_path(context)
 
 
-def _save_as_current(image: Any, context: Mapping[str, Any]) -> Path:
+def _save_as_current(image: Any, context: Mapping[str, Any]) -> str:
     target_dir = _get_intermediate_image_dir()
     filename = f"img_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}.png"
-    path = target_dir / filename
+    abs_path = target_dir / filename
     try:
-        image.save(path, format="PNG")
+        image.save(abs_path, format="PNG")
     except Exception:
-        path.unlink(missing_ok=True)
+        abs_path.unlink(missing_ok=True)
         raise
+    rel_path_str = _to_relative_path(abs_path)
     if isinstance(context, ToolExecutionContext):
-        context.set_generated_image(path)
+        context.set_generated_image(abs_path)
+        context["current_image_path"] = rel_path_str
     elif isinstance(context, MutableMapping):
-        context["current_image_path"] = str(path)
-    return path
+        context["current_image_path"] = rel_path_str
+    return rel_path_str
 
 
 def _python_exec(arguments: dict[str, Any], context: Mapping[str, Any]) -> dict[str, Any]:
@@ -428,7 +455,7 @@ def _run_ocr(image_path: str) -> dict[str, Any]:
 def _ocr(arguments: dict[str, Any], context: Mapping[str, Any]) -> dict[str, Any]:
     source = _get_image_source(arguments, context)
     result = _run_ocr(str(source))
-    return {"success": True, "image_path": str(source), **result}
+    return {"success": True, "image_path": _to_relative_path(source), **result}
 
 
 def _zoom_image(arguments: dict[str, Any], context: Mapping[str, Any]) -> dict[str, Any]:
@@ -489,7 +516,7 @@ def _visual_analyzer(arguments: dict[str, Any], context: Mapping[str, Any]) -> d
     gray = array.mean(axis=2)
     ys, xs = np.where(gray < float(gray.mean()))
     result["dark_bbox"] = [int(xs.min()), int(ys.min()), int(xs.max() + 1), int(ys.max() + 1)] if len(xs) else None
-    return {"success": True, "image_path": str(source), "analysis": result}
+    return {"success": True, "image_path": _to_relative_path(source), "analysis": result}
 
 
 def _plot_parser(arguments: dict[str, Any], context: Mapping[str, Any]) -> dict[str, Any]:
@@ -502,7 +529,7 @@ def _plot_parser(arguments: dict[str, Any], context: Mapping[str, Any]) -> dict[
     result = _run_ocr(str(source))
     return {
         "success": True,
-        "image_path": str(source),
+        "image_path": _to_relative_path(source),
         "image_size": {"width": width, "height": height},
         "labels": result["lines"],
     }
@@ -541,7 +568,7 @@ def _object_detector(arguments: dict[str, Any], context: Mapping[str, Any]) -> d
             "confidence": round(float(box.conf.item()), 5),
             "bbox_xyxy": [round(float(value), 2) for value in box.xyxy[0].tolist()],
         })
-    return {"success": True, "image_path": str(source), "model": model_file.name, "detections": detections}
+    return {"success": True, "image_path": _to_relative_path(source), "model": model_file.name, "detections": detections}
 
 
 def _retrieve(arguments: dict[str, Any], context: Mapping[str, Any]) -> dict[str, Any]:

@@ -228,7 +228,7 @@ def main() -> int:
             base_url = str(local_cfg.get("base_url") or "http://127.0.0.1:8000/v1")
             model = str(local_cfg.get("model") or "qwen3.8-27b")
             timeout = str(local_cfg.get("timeout_seconds") or 300)
-            concurrency = str(local_cfg.get("concurrency") or 4)
+            concurrency = str(local_cfg.get("concurrency") or 8)
 
         env["AGENT0_RESPONSES_BASE_URL"] = env.get("AGENT0_RESPONSES_BASE_URL") or base_url
         env["AGENT0_RESPONSES_API_KEY"] = env.get("AGENT0_RESPONSES_API_KEY") or api_key

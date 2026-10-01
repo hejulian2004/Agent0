@@ -108,6 +108,36 @@ def test_format_cleaner_audit_and_deduplication():
     assert len(h1) == 64
 
 
+def test_format_cleaner_normalizes_absolute_to_relative_paths():
+    builder = SFTTrajectoryBuilder()
+    traj = CanonicalTrajectory("rel_path_1", builder.canonical_tools)
+    traj.append({"type": "message", "role": "system", "content": render_system_prompt()})
+
+    # Simulate trajectory containing local absolute path
+    from scripts.build_sft_dataset import ROOT
+    abs_img = str(ROOT / "outputs" / "intermediate_images" / "test_abs.png")
+    traj.append({"type": "message", "role": "user", "content": f"Image: {abs_img}\nInspect image."})
+    traj.append({"type": "function_call", "call_id": "c1", "name": "crop_image", "arguments": {"image_path": abs_img, "bbox": [0, 0, 10, 10]}})
+    traj.append({"type": "function_call_output", "call_id": "c1", "output": {"success": True, "image_path": abs_img, "output_path": abs_img, "image_size": [10, 10]}})
+    traj.append({"type": "message", "role": "assistant", "content": f"The region was saved to {abs_img}."})
+
+    # Clean trajectory text
+    FormatCleaner.clean_trajectory_text(traj)
+
+    # All absolute paths must be normalized to relative paths
+    user_text = traj.items[1]["content"]
+    assert str(ROOT) not in user_text
+    assert "outputs/intermediate_images/test_abs.png" in user_text
+
+    call_args = traj.items[2]["arguments"]
+    assert str(ROOT) not in call_args["image_path"]
+    assert call_args["image_path"] == "outputs/intermediate_images/test_abs.png"
+
+    call_out = traj.items[3]["output"]
+    assert str(ROOT) not in call_out["image_path"]
+    assert call_out["image_path"] == "outputs/intermediate_images/test_abs.png"
+
+
 # ==============================================================================
 # 3. SFT Synthesis & Export Tests
 # ==============================================================================
@@ -149,6 +179,32 @@ def test_builder_synthesis_and_export(tmp_path):
     check = verify_sft_dataset_compatibility(out_dir / "train.parquet")
     assert check["status"] == "passed"
     assert check["dataset_len"] == 6
+    assert check["loss_mask_trainable_tokens"] > 0
+
+
+def test_builder_export_all_train_records_default_ratio(tmp_path):
+    builder = SFTTrajectoryBuilder()
+    trajs = builder.synthesize_trajectories(5, stage=1, seed=123)
+    out_dir = tmp_path / "sft_full_train"
+    manifest = builder.export(
+        trajs,
+        out_dir,
+        train_ratio=1.0,
+        export_format="both",
+        seed=123,
+    )
+
+    assert manifest["total_records"] == 5
+    assert manifest["train_records"] == 5
+    assert manifest["val_records"] == 0
+    assert (out_dir / "train.parquet").is_file()
+    assert (out_dir / "train.jsonl").is_file()
+    assert not (out_dir / "val.parquet").exists()
+    assert not (out_dir / "val.jsonl").exists()
+
+    check = verify_sft_dataset_compatibility(out_dir / "train.parquet")
+    assert check["status"] == "passed"
+    assert check["dataset_len"] == 5
     assert check["loss_mask_trainable_tokens"] > 0
 
 

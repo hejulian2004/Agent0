@@ -45,6 +45,8 @@ from agent0_protocol.tools import (
     execute_call_batch,
     get_tool_registry,
     _get_intermediate_image_dir,
+    _to_relative_path,
+    _resolve_relative_path,
 )
 from agent0_protocol.verifier import verify_trajectory
 from tools.data_builder.backends.base import image_data_url
@@ -234,7 +236,7 @@ class FormatCleaner:
         if image.startswith(("http://", "https://")):
             parsed = urlparse(image)
             return bool(parsed.netloc and parsed.path)
-        path = Path(image)
+        path = _resolve_relative_path(image)
         if not path.is_file():
             return False
         try:
@@ -246,21 +248,42 @@ class FormatCleaner:
 
     @classmethod
     def clean_trajectory_text(cls, trajectory: CanonicalTrajectory) -> None:
-        """Clean control characters from all messages and reasoning items."""
+        """Clean control characters and normalize all local absolute paths to relative paths."""
+        root_str = str(ROOT).rstrip("/") + "/"
         for item in trajectory.items:
             kind = item.get("type")
             if kind == "message":
                 content = item.get("content")
                 if isinstance(content, str):
-                    item["content"] = cls.strip_control_characters(content)
+                    text = cls.strip_control_characters(content)
+                    if root_str in text:
+                        text = text.replace(root_str, "")
+                    item["content"] = text
                 elif isinstance(content, list):
                     for part in content:
                         if isinstance(part, dict) and "text" in part:
-                            part["text"] = cls.strip_control_characters(str(part["text"]))
+                            text = cls.strip_control_characters(str(part["text"]))
+                            if root_str in text:
+                                text = text.replace(root_str, "")
+                            part["text"] = text
             elif kind == "reasoning":
                 for part in item.get("summary", []):
                     if isinstance(part, dict) and "text" in part:
-                        part["text"] = cls.strip_control_characters(str(part["text"]))
+                        text = cls.strip_control_characters(str(part["text"]))
+                        if root_str in text:
+                            text = text.replace(root_str, "")
+                        part["text"] = text
+            elif kind == "function_call":
+                args = item.get("arguments", {})
+                for k, v in args.items():
+                    if isinstance(v, str) and root_str in v:
+                        args[k] = v.replace(root_str, "")
+            elif kind == "function_call_output":
+                out = item.get("output", {})
+                if isinstance(out, dict):
+                    for k in ("image_path", "output_path"):
+                        if isinstance(out.get(k), str) and root_str in out[k]:
+                            out[k] = out[k].replace(root_str, "")
 
     @staticmethod
     def compute_trajectory_hash(trajectory: CanonicalTrajectory) -> str:
@@ -531,8 +554,8 @@ class SFTTrajectoryBuilder:
                 pattern = i % 4
                 colors = ["blue", "green", "navy", "purple", "teal", "maroon", "olive", "coral"]
                 col = colors[i % len(colors)]
-                base_img = _create_synthetic_image(color=col, width=120 + (i % 5) * 10, height=80 + (i % 5) * 8)
-                context = ToolExecutionContext(image=base_img)
+                base_img = _to_relative_path(_create_synthetic_image(color=col, width=120 + (i % 5) * 10, height=80 + (i % 5) * 8))
+                context = ToolExecutionContext(image=_resolve_relative_path(base_img))
                 try:
                     if pattern == 0:
                         # Crop + Analyze
@@ -790,7 +813,7 @@ class SFTTrajectoryBuilder:
                 with val_jsonl_path.open("w", encoding="utf-8") as f:
                     for rec in val_records:
                         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            exported_files.append(str(val_jsonl_path))
+                exported_files.append(str(val_jsonl_path))
 
         # 3. Export Manifest
         all_tools = [tool for rec in records for tool in rec.get("tools_used", [])]
@@ -847,7 +870,7 @@ def run_task_rollouts_concurrent(
     builder: SFTTrajectoryBuilder,
     output_jsonl: Path,
     *,
-    concurrency: int = 4,
+    concurrency: int = 8,
     resume: bool = True,
     verify_semantics: bool = True,
     min_steps: int = 3,
@@ -1087,8 +1110,8 @@ def main() -> int:
     parser.add_argument(
         "--train-ratio",
         type=float,
-        default=0.9,
-        help="Ratio of samples allocated to training set (default: 0.9).",
+        default=1.0,
+        help="Ratio of samples allocated to training set (default: 1.0, all samples for training; dedicated datasets used for evaluation).",
     )
     parser.add_argument(
         "--teacher-backend",
@@ -1099,8 +1122,8 @@ def main() -> int:
     parser.add_argument(
         "--concurrency", "-c",
         type=int,
-        default=4,
-        help="Max concurrent rollout requests to local/remote model (default: 4).",
+        default=8,
+        help="Max concurrent rollout requests to local/remote model (default: 8).",
     )
     parser.add_argument(
         "--resume",
@@ -1200,13 +1223,13 @@ def main() -> int:
             default_model = "qwen3.8-27b"
             default_key = "EMPTY"
             default_timeout = 300.0
-            default_concurrency = int(os.environ.get("AGENT0_CONCURRENCY", "4"))
+            default_concurrency = int(os.environ.get("AGENT0_CONCURRENCY", "8"))
 
         teacher_url = args.teacher_base_url or os.environ.get("AGENT0_RESPONSES_BASE_URL") or default_url
         teacher_model = args.teacher_model or os.environ.get("AGENT0_RESPONSES_MODEL") or default_model
         teacher_key = args.teacher_api_key or os.environ.get("AGENT0_RESPONSES_API_KEY") or default_key
         teacher_timeout = args.teacher_timeout if args.teacher_timeout != 180.0 else float(os.environ.get("AGENT0_RESPONSES_TIMEOUT_SECONDS", str(default_timeout)))
-        concurrency = args.concurrency if args.concurrency != 4 else default_concurrency
+        concurrency = args.concurrency if args.concurrency != 8 else default_concurrency
 
         cfg = ResponsesConfig(
             base_url=teacher_url,

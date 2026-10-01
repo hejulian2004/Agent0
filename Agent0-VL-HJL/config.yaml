@@ -90,8 +90,8 @@ data_export:
 sft_data_generation:
   output_dir: data/sft
   stage: 1
-  concurrency: 4
-  train_ratio: 0.9
+  concurrency: 8
+  train_ratio: 1.0
   format: both # both | parquet | jsonl
   min_steps: 3
   # 教师模型后端选择：local (默认调用本地教师模型) | remote (可选调用远程 API)
@@ -102,7 +102,7 @@ sft_data_generation:
     model: qwen3.8-27b
     api_key: EMPTY
     timeout_seconds: 300
-    concurrency: 4
+    concurrency: 8
   # 远程 Responses API 端点设置（可选，调用公网 OpenAI/云端模型）
   remote_teacher:
     base_url: https://api.openai.com/v1
