@@ -285,11 +285,11 @@ def test_real_cpu_adapter_gradient_ownership(settings):
     policies.step('repair')
     changed = [name for name, value in policies.model.named_parameters()
                if not torch.equal(value, before[name])]
-    assert changed and all('.repair.' in name for name in changed)
-    assert policies.versions == {'solve': 0, 'repair': 1, 'verify': 0}
+    assert changed and all('.shared.' in name for name in changed)
+    assert policies.versions == {'shared': 1}
 
 
-def test_native_sync_preserves_base_and_exports_separate_roles(settings, tmp_path):
+def test_native_sync_preserves_base_and_exports_shared_adapter(settings, tmp_path):
     import torch
     from torch import nn
     from safetensors.torch import load_file
@@ -309,7 +309,7 @@ def test_native_sync_preserves_base_and_exports_separate_roles(settings, tmp_pat
     with torch.no_grad():
         for name, value in policies.model.named_parameters():
             if 'lora_' in name:
-                value.fill_(2 if '.repair.' in name else 1)
+                value.fill_(1)
     base, adapters = split_weights(policies.model.state_dict(), policies.model)
     assert set(base) == set(frozen)
     assert all(torch.equal(base[name], value) for name, value in frozen.items())
@@ -317,12 +317,12 @@ def test_native_sync_preserves_base_and_exports_separate_roles(settings, tmp_pat
     for mode, path in paths.items():
         exported = load_file(str(Path(path) / 'adapter_model.safetensors'))
         assert exported and all('.' + mode + '.' not in name for name in exported)
-        assert all(torch.all(value == (2 if mode == 'repair' else 1)) for value in exported.values())
+        assert all(torch.all(value == 1) for value in exported.values())
     with pytest.raises(ValueError, match='replace'):
         save_snapshots(tmp_path / 'snapshots', adapters, policies.model.peft_config)
 
 
-def test_three_adapter_checkpoint_roundtrip(settings, tmp_path):
+def test_shared_adapter_checkpoint_roundtrip(settings, tmp_path):
     import torch
     from torch import nn
     from tools.training.role_adapters import RoleAdapters
@@ -354,10 +354,10 @@ def test_three_adapter_checkpoint_roundtrip(settings, tmp_path):
     restored_base.load_state_dict(frozen_state)
     restored = RoleAdapters.from_bundle(restored_base, base, checkpoint / 'bundle', .01)
     load_state(checkpoint, restored, 'fixed-config-data-model')
-    assert restored.versions == {'solve': 0, 'repair': 0, 'verify': 1}
-    assert restored.optimizers['verify'].state_dict()['state']
-    assert not restored.optimizers['repair'].state_dict()['state']
-    for mode in ('solve', 'repair', 'verify'):
-        assert all(torch.equal(a, b) for a, b in zip(policies.parameters[mode], restored.parameters[mode]))
+    assert restored.versions == {'shared': 1}
+    assert restored.optimizers['shared'].state_dict()['state']
+    assert set(restored.optimizers) == {'shared'}
+    for adapter in ('shared',):
+        assert all(torch.equal(a, b) for a, b in zip(policies.parameters[adapter], restored.parameters[adapter]))
     with pytest.raises(ValueError, match='Incompatible'):
         load_state(checkpoint, restored, 'old-data-config')

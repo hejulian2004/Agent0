@@ -2,10 +2,12 @@
 import json
 from pathlib import Path
 import time
+import uuid
 
 from agent0_protocol.checkpointed import MODES
 from tools.checkpointed_statistics import summarize
 from tools.training.checkpointed_records import pack_records
+from tools.training.checkpointed_update import mode_weights
 from verl import DataProto
 
 
@@ -20,7 +22,8 @@ def role_step(trainer, batch):
     batches, flows = pack_records(records.non_tensor_batch['checkpointed_records'], settings,
         trainer.processor, trainer.tokenizer.pad_token_id,
         trainer.config.trainer.n_gpus_per_node * trainer.config.trainer.nnodes)
-    metrics = {'timing_s/gen': generation_seconds}
+    metrics = {'timing_s/gen': generation_seconds,
+               'adapter/shared_version': getattr(records, 'meta_info', {}).get('adapter_versions', {}).get('shared', 0)}
     # Compute all frozen references before entering any role's update.
     for mode in MODES:
         role_batch = batches[mode]
@@ -28,15 +31,25 @@ def role_step(trainer, batch):
             role_batch.meta_info['temperature'] = trainer.config.actor_rollout_ref.rollout.temperature
             if trainer.use_reference_policy:
                 role_batch.union(trainer.ref_policy_wg.compute_ref_log_prob(role_batch))
-    started = time.monotonic()
+    counts = {mode: batches[mode].meta_info['valid_group_count'] if batches[mode] is not None else 0
+              for mode in MODES}
+    weights = mode_weights(counts, settings)
+    active = {mode: batch for mode, batch in batches.items() if batch is not None and weights[mode]}
+    versions = {batch.meta_info['policy_version'] for batch in active.values()}
+    if len(versions) > 1:
+        raise RuntimeError('Shared rollout policy versions disagree across modes')
+    phase_id = uuid.uuid4().hex
     for mode in MODES:
-        role_batch = batches[mode]
-        if role_batch is None:
+        metrics[mode + '/valid_groups'] = counts[mode]
+        metrics[mode + '/loss_weight'] = weights[mode]
+        if mode not in active:
             metrics[mode + '/masked_step'] = 1
-            continue
-        output = trainer.actor_rollout_wg.update_actor(role_batch)
-        metrics.update({mode + '/' + name: value for name, value in
-                        reduce_metrics(output.meta_info['metrics']).items()})
+        else:
+            active[mode].meta_info.update(update_phase_id=phase_id, joint_weights=weights)
+    started = time.monotonic()
+    if active:
+        output = trainer.actor_rollout_wg.update_checkpointed_actor(**active)
+        metrics.update(reduce_metrics(output.meta_info['metrics']))
     metrics['timing_s/update_actor'] = time.monotonic() - started
     report = summarize(flows, settings)
     before = [flow['attempts'][0]['correct'] for flow in flows]
@@ -45,6 +58,11 @@ def role_step(trainer, batch):
         known = [value for value in values if value is not None]
         metrics[name] = sum(known) / len(known) if known else 0.0
         metrics[name + '_observed'] = len(known)
+    metrics['solve/accuracy'] = metrics['before_accuracy']
+    repairs = [s['correct'] for flow in flows for s in flow['sessions']
+               if s['spec']['mode'] == 'repair' and s['correct'] is not None]
+    metrics['repair/accuracy'] = sum(repairs) / len(repairs) if repairs else 0.0
+    metrics['repair/accuracy_observed'] = len(repairs)
     transitions = report['transitions']
     for before_value in (0, 1):
         total = sum(transitions.get(f'{before_value}->{after_value}', 0) for after_value in (0, 1))

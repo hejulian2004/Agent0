@@ -1,20 +1,20 @@
-"""Register separately exported S/R/V adapters against a frozen base model."""
+"""Register one shared SFT adapter against a frozen base model."""
 import argparse
 import hashlib
 import json
 from pathlib import Path
 
-from agent0_protocol.checkpointed import MODES, PROTOCOL
+from agent0_protocol.checkpointed import ADAPTERS, ADAPTER_FOR_MODE, ADAPTER_LAYOUT, PROTOCOL
 
 
 def register(base_model, adapters, output):
     base = Path(base_model).resolve()
-    if not (base / 'config.json').is_file() or set(adapters) != set(MODES):
-        raise ValueError('A base HF model and all three adapter exports are required')
+    if not (base / 'config.json').is_file() or set(adapters) != set(ADAPTERS):
+        raise ValueError('A base HF model and one shared adapter export are required')
     if not list(base.glob('*.safetensors')):
         raise ValueError('Frozen base model safetensors are missing')
     entries, fingerprints, configs = {}, {}, {}
-    for mode in MODES:
+    for mode in ADAPTERS:
         path = Path(adapters[mode]).resolve()
         weights = path / 'adapter_model.safetensors'
         config = path / 'adapter_config.json'
@@ -31,12 +31,13 @@ def register(base_model, adapters, output):
                               for p in (weights, config)}
     if len({(v['r'], v['lora_alpha'], tuple(sorted(v['target_modules']))) for v in configs.values()}) != 1:
         raise ValueError('All role exports must use compatible LoRA shapes')
-    manifest = {'protocol_version': PROTOCOL, 'base_model': str(base), 'adapters': entries,
+    manifest = {'protocol_version': PROTOCOL, 'adapter_layout_version': ADAPTER_LAYOUT,
+        'mode_to_adapter': dict(ADAPTER_FOR_MODE), 'base_model': str(base), 'adapters': entries,
         'adapter_hashes': fingerprints,
         'base_config_sha256': hashlib.sha256((base / 'config.json').read_bytes()).hexdigest(),
         'base_weight_files': {p.name: [p.stat().st_size, p.stat().st_mtime_ns]
                               for p in sorted(base.glob('*.safetensors'))},
-        'strategy': 'separate', 'weights_summed': False}
+        'strategy': 'shared', 'weights_summed': False}
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     if (output / 'bundle.json').exists():
@@ -48,12 +49,12 @@ def register(base_model, adapters, output):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--base-model', required=True)
-    for mode in MODES:
+    for mode in ADAPTERS:
         parser.add_argument('--' + mode, required=True)
     parser.add_argument('--output', required=True)
     args = parser.parse_args()
-    register(args.base_model, {mode: getattr(args, mode) for mode in MODES}, args.output)
-    print('Registered separate solve/repair/verify adapters; no model weights were merged.')
+    register(args.base_model, {mode: getattr(args, mode) for mode in ADAPTERS}, args.output)
+    print('Registered one shared adapter for solve/repair/verify; no model weights were merged.')
 
 
 if __name__ == '__main__':

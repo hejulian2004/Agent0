@@ -16,8 +16,14 @@ class HJLCanonicalTemplate(Qwen2_5VLTemplate):
         encoded = self.processor(text=[text], images=images or None, padding=False, return_tensors="pt")
         ids = encoded.pop("input_ids")[0].tolist()
         encoded.pop("attention_mask", None)
-        if self.max_length is not None and len(ids) > self.max_length:
-            raise MaxLengthError(f"Canonical row has {len(ids)} tokens; limit is {self.max_length}")
+        limit = self.max_length
+        mode_limit = trajectory.metadata.get('sft_max_tokens')
+        if mode_limit is not None:
+            if type(mode_limit) is not int or mode_limit <= 0:
+                raise ValueError('Invalid per-mode SFT token limit')
+            limit = min(limit, mode_limit) if limit is not None else mode_limit
+        if limit is not None and len(ids) > limit:
+            raise MaxLengthError(f"Canonical row has {len(ids)} tokens; limit is {limit}")
         labels = assistant_labels(ids, self.tokenizer)
         boundary = trajectory.metadata.get('loss_start_item_index', 0)
         if boundary:

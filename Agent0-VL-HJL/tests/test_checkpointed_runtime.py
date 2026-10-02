@@ -68,18 +68,22 @@ def test_native_adapter_versions_and_routes():
 
     engine = Engine()
     factory = lambda name, index, path: SimpleNamespace(lora_name=name, lora_int_id=index, lora_path=path)
-    paths = dict(solve='/s', repair='/r', verify='/v')
+    paths = dict(shared='/shared')
     policies = NativeRoleLoRA(engine, paths, request_factory=factory)
     policies.begin_rollout()
-    assert len({policies.request(mode).lora_int_id for mode in paths}) == 3
+    assert len({policies.request(mode).lora_int_id for mode in ('solve', 'repair', 'verify')}) == 1
+    assert len(engine.loaded) == 1
+    for mode in ('solve', 'verify', 'repair', 'verify'):
+        assert policies.request(mode) is engine.loaded[0]
+    assert not engine.removed
     with pytest.raises(RuntimeError):
         policies.replace(paths, dict.fromkeys(paths, 1))
     policies.end_rollout()
-    assert engine.removed == [1, 2, 3]
+    assert engine.removed == [1]
     policies.replace(paths, dict.fromkeys(paths, 1))
     policies.begin_rollout()
-    assert policies.request('verify').lora_name == 'verify-v1'
-    assert policies.request('verify').lora_int_id == 6
+    assert policies.request('verify').lora_name == 'shared-v1'
+    assert policies.request('verify').lora_int_id == 2
 
 
 def test_role_batch_tito_and_whole_dummy_groups():

@@ -10,7 +10,7 @@ import uuid
 
 import torch
 
-from agent0_protocol.checkpointed import Episode, SessionResult, SessionSpec, PROTOCOL, digest, text_of
+from agent0_protocol.checkpointed import Episode, SessionResult, SessionSpec, PROTOCOL, ADAPTER_LAYOUT, digest, text_of
 from agent0_protocol.schema import CanonicalTrajectory, ProtocolError
 from tools.canonical_multimodal import item_images, load_image
 from tools.data_builder.sft_quality import StrictAnswerJudge
@@ -95,7 +95,8 @@ def generate_records(rollout, prompts, settings, adapters, group, rank):
             for episode in episodes:
                 stream.write(json.dumps(episode.to_dict(), ensure_ascii=False) + '\n')
     return DataProto(batch=prompts.batch,
-        non_tensor_batch={'checkpointed_records': object_array(records)})
+        non_tensor_batch={'checkpointed_records': object_array(records)},
+        meta_info={'adapter_versions': dict(adapters.versions), 'adapter_layout_version': ADAPTER_LAYOUT})
 
 
 def pack_records(records, settings, processor, pad_token_id, world_size):

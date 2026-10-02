@@ -598,7 +598,7 @@ profiles:
       min_steps: 1
     checkpointed:
       protocol_version: agent0.checkpointed.v1
-      adapter_strategy: separate
+      adapter_strategy: shared
       adapter_bundle: null
       limits:
         max_solver_segments: 8
@@ -648,10 +648,14 @@ profiles:
       adapters:
         rank: 16
         alpha: 64
-        max_loras: 3
-        max_cpu_loras: 3
+        max_loras: 1
+        max_cpu_loras: 1
         target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
         modes: [solve, repair, verify]
+      joint_training:
+        rl_weighting:
+          method: prior_sqrt_groups
+          priors: {solve: 0.5, repair: 0.3, verify: 0.2}
       statistics:
         quantiles: [0.5, 0.9, 0.95, 0.99]
         coverage_target: 0.99

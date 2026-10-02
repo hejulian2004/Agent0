@@ -43,6 +43,8 @@ def sft_command(root, config, args):
         "--dataloader_num_workers", str(s["workers"]), "--dataloader_prefetch_factor", "1",
         "--dataloader_pin_memory", "false", "--dataset_num_proc", "1", "--logging_steps", "1", "--output_dir", output]
     if 'checkpointed' in config:
+        validate += ['--mode-limits', json.dumps({mode: config['checkpointed']['limits'][f'sft_{mode}_tokens']
+                                               for mode in ('solve', 'repair', 'verify')})]
         position = command.index('--target_modules')
         command[position + 1:position + 2] = config['checkpointed']['adapters']['target_modules']
     return validate, command, output
@@ -80,6 +82,7 @@ def launch_local(config, action, extra, *, root, dry_run):
     parser.add_argument('--base-model')
     parser.add_argument('--adapter-bundle')
     parser.add_argument('--mode', choices=('solve', 'repair', 'verify'))
+    parser.add_argument('--adapter', choices=('shared',), default='shared')
     parser.add_argument("--data")
     parser.add_argument("--output")
     parser.add_argument("--phase", choices=("full", "warmup", "serc"), default=config["rl_schedule"]["phase"])
@@ -94,15 +97,16 @@ def launch_local(config, action, extra, *, root, dry_run):
     parser.add_argument("--gpus")
     args, overrides = parser.parse_known_args(extra)
     if 'checkpointed' in config and action in {'sft-local', 'export-sft'}:
-        if not args.mode:
-            raise SystemExit('Checkpointed SFT/export requires --mode solve|repair|verify')
+        if args.mode:
+            raise SystemExit('Checkpointed SFT/export trains one shared adapter; use --adapter shared, not --mode')
         config = copy.deepcopy(config)
         cp = config['checkpointed']
-        config['sft_local']['max_length'] = cp['limits'][f'sft_{args.mode}_tokens']
+        config['sft_local']['max_length'] = max(cp['limits'][f'sft_{mode}_tokens']
+                                                for mode in ('solve', 'repair', 'verify'))
         config['sft_local']['lora_rank'] = cp['adapters']['rank']
         config['sft_local']['lora_alpha'] = cp['adapters']['alpha']
-        config['sft_local']['output_dir'] = cp['sft_output_root'] + '/' + args.mode
-        config['local_data']['sft_output'] = str(Path(config['local_data']['sft_output']).parent / 'roles' / (args.mode + '.jsonl'))
+        config['sft_local']['output_dir'] = cp['sft_output_root'] + '/shared'
+        config['local_data']['sft_output'] = str(Path(config['local_data']['sft_output']).parent / 'roles' / 'shared.jsonl')
     plan = validate_local(config)
     env = os.environ.copy()
     env.update(CUDA_VISIBLE_DEVICES=args.gpus or ",".join(map(str, config["runtime"]["gpus"])),
@@ -193,7 +197,7 @@ def launch_local(config, action, extra, *, root, dry_run):
     if inventory and not args.preflight_only:
         Path(inventory).mkdir(parents=True, exist_ok=False)
         (Path(inventory) / "README.md").write_text("Local LoRA SFT; status: launched (completion requires inspection).\n\n" +
-            "\n".join(shlex.join(command) for command in commands) + "\n\nProfile: config.yaml/local_4090. GPU=" + env["CUDA_VISIBLE_DEVICES"] + "; BF16; LoRA16/64; TP4 PP1; context30720; global4/micro4; epochs3. Optimizer/RNG saved; HF export separate.\n")
+            "\n".join(shlex.join(command) for command in commands) + "\n\nProfile: config.yaml/" + config.get("selected_profile", "local_4090") + ". GPU=" + env["CUDA_VISIBLE_DEVICES"] + "; BF16; LoRA16/64; TP4 PP1; context30720; global4/micro4; epochs3. Optimizer/RNG saved; HF export separate.\n")
     for command in commands:
         result = subprocess.run(command, cwd=root, env=env)
         if result.returncode:

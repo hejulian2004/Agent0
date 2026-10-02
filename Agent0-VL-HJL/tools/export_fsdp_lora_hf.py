@@ -51,6 +51,18 @@ def rank_files(actor_dir: Path) -> list[Path]:
 
 
 def export_adapter(actor_dir: Path, output: Path, base_model: Path, rank: int, alpha: int) -> Path:
+    adapter_name = 'default'
+    sidecar = actor_dir / 'role_checkpoint.json'
+    if sidecar.exists():
+        from agent0_protocol.checkpointed import PROTOCOL, ADAPTER_LAYOUT, ADAPTER_FOR_MODE, ADAPTERS
+        info = json.loads(sidecar.read_text())
+        if (info.get('protocol_version') != PROTOCOL or
+                info.get('adapter_layout_version') != ADAPTER_LAYOUT or
+                info.get('mode_to_adapter') != ADAPTER_FOR_MODE or
+                set(info.get('versions', {})) != set(ADAPTERS)):
+            raise ValueError('Old multi-adapter checkpoint cannot be exported as shared LoRA')
+        adapter_name = 'shared'
+    lora_suffixes = tuple(suffix.replace('.default.', '.' + adapter_name + '.') for suffix in LORA_SUFFIXES)
     if output.exists():
         if (output / "adapter_model.safetensors").is_file() and (output / "adapter_config.json").is_file():
             print(f"Reusing existing PEFT adapter: {output}", flush=True)
@@ -63,7 +75,7 @@ def export_adapter(actor_dir: Path, output: Path, base_model: Path, rank: int, a
 
     for rank_index, path in enumerate(files):
         state = torch.load(path, map_location="cpu", weights_only=False)
-        rank_keys = {key for key in state if any(key.endswith(suffix) for suffix in LORA_SUFFIXES)}
+        rank_keys = {key for key in state if any(key.endswith(suffix) for suffix in lora_suffixes)}
         if rank_index == 0:
             adapter_keys = rank_keys
         elif rank_keys != adapter_keys:
@@ -84,7 +96,7 @@ def export_adapter(actor_dir: Path, output: Path, base_model: Path, rank: int, a
             elif metadata[key] != descriptor:
                 raise RuntimeError(f"Tensor metadata differs between FSDP ranks for {key}")
             pieces.setdefault(key, []).append(local.clone())
-            for suffix in LORA_SUFFIXES:
+            for suffix in lora_suffixes:
                 if key.endswith(suffix):
                     module_names.add(key[:-len(suffix)])
 
@@ -114,7 +126,7 @@ def export_adapter(actor_dir: Path, output: Path, base_model: Path, rank: int, a
             raise RuntimeError(f"Unsupported placement {placement_repr} for {key}")
         if tuple(full.shape) != shape:
             raise RuntimeError(f"Reconstructed {key} has {tuple(full.shape)}, expected {shape}")
-        export_key = key.replace(".default.weight", ".weight")
+        export_key = key.replace("." + adapter_name + ".weight", ".weight")
         adapter_state[export_key] = full.contiguous()
 
     output.mkdir(parents=True, exist_ok=False)

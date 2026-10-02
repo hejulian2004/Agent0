@@ -1,4 +1,4 @@
-"""Manual VERL entry for a frozen base and three independent SFT adapters."""
+"""Manual VERL entry for a frozen base and one shared SFT adapter."""
 import argparse
 import copy
 from datetime import datetime
@@ -8,7 +8,7 @@ from pathlib import Path
 import shlex
 import sys
 
-from agent0_protocol.checkpointed import PROTOCOL, digest, role_prompt
+from agent0_protocol.checkpointed import PROTOCOL, ADAPTER_LAYOUT, ADAPTER_FOR_MODE, digest, role_prompt
 from tools.local_profile import load_config, validate_local
 from tools.training.role_adapters import validate_bundle
 
@@ -98,7 +98,8 @@ def main():
         manifest = validate_inputs(root, config, args.base_model, args.adapter_bundle)
         from tools.local_rl import protocol_fingerprint
         fingerprint = digest({'code_data_model': protocol_fingerprint(root, config, args.base_model),
-                              'bundle': manifest, 'entry': Path(__file__).read_text()})
+                              'bundle': manifest, 'adapter_layout_version': ADAPTER_LAYOUT,
+                              'mode_to_adapter': ADAPTER_FOR_MODE, 'entry': Path(__file__).read_text()})
     hydra['actor_rollout_ref']['rollout']['checkpointed']['training_fingerprint'] = fingerprint
     hydra['local_schedule'] = {'phase': args.phase, 'warmup_epochs': schedule['warmup_epochs'],
         'formal_epochs': schedule['formal_epochs'], 'formal_data': str(root / config['local_data']['rl_formal']),
@@ -129,7 +130,7 @@ def main():
     if not args.resume_dir:
         output.mkdir(parents=True, exist_ok=False)
         (output / 'README.md').write_text('Checkpointed role RL\n\nStatus: manual launch requested.\n' +
-            json.dumps(hydra, indent=2) + '\nFrozen base; independent LoRA-S/R/V; optimizer and scheduler per mode.\n')
+            json.dumps(hydra, indent=2) + '\nFrozen base; shared LoRA for Solve/Repair/Verify; one optimizer and scheduler.\n')
     import os
     from tools.training.launch_logged import run
     env = sandbox_environment(config)

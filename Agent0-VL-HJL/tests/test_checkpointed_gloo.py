@@ -160,7 +160,7 @@ def _fsdp_roles_worker(rank, size, rendezvous, directory):
         policies.select_fsdp(mode)
         model(torch.ones(1, 3)).sum().backward()
         policies.step(mode)
-        schedulers[mode].step()
+        schedulers['shared'].step()
     FSDP.set_state_dict_type(model, StateDictType.FULL_STATE_DICT,
                             FullStateDictConfig(offload_to_cpu=True, rank0_only=False))
     path = Path(directory) / 'roles'
@@ -170,8 +170,8 @@ def _fsdp_roles_worker(rank, size, rendezvous, directory):
     for optimizer in policies.optimizers.values():
         optimizer.state.clear()
     load(path, model, policies, schedulers, 'cpu-protocol-fingerprint')
-    assert policies.versions == {'solve': 1, 'repair': 1, 'verify': 1}
-    # Each optimizer still owns only its own adapter parameters.
+    assert policies.versions == {'shared': 3}
+    # The sole optimizer owns the shared adapter parameters.
     for mode, optimizer in policies.optimizers.items():
         observed = torch.tensor(len(optimizer.state))
         dist.all_reduce(observed)

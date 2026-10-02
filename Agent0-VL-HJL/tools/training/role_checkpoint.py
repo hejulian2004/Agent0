@@ -1,4 +1,4 @@
-"""Atomic three-adapter checkpoints with independent optimizers and RNG state.
+"""Atomic shared-adapter checkpoints with one optimizer and RNG state.
 
 For FSDP the worker must first provide consolidated adapter/optimizer state.
 This module handles plain PEFT policies and never reconstructs missing roles.
@@ -15,7 +15,7 @@ import uuid
 import numpy as np
 import torch
 
-from agent0_protocol.checkpointed import MODES, PROTOCOL
+from agent0_protocol.checkpointed import ADAPTERS, ADAPTER_FOR_MODE, ADAPTER_LAYOUT, PROTOCOL
 from tools.checkpointed_bundle import register
 
 
@@ -41,22 +41,23 @@ def save(path, policies, base_path, fingerprint, schedulers=None):
     temporary = path.with_name(path.name + '.tmp-' + uuid.uuid4().hex)
     temporary.mkdir()
     try:
-        policies.model.save_pretrained(temporary / 'adapters', selected_adapters=list(MODES))
-        register(base_path, {mode: temporary / 'adapters' / mode for mode in MODES}, temporary / 'bundle')
+        policies.model.save_pretrained(temporary / 'adapters', selected_adapters=list(ADAPTERS))
+        register(base_path, {mode: temporary / 'adapters' / mode for mode in ADAPTERS}, temporary / 'bundle')
         manifest_path = temporary / 'bundle' / 'bundle.json'
         manifest = json.loads(manifest_path.read_text())
         # Paths must resolve after the atomic directory rename.
-        manifest['adapters'] = {mode: str(path / 'adapters' / mode) for mode in MODES}
+        manifest['adapters'] = {mode: str(path / 'adapters' / mode) for mode in ADAPTERS}
         manifest_path.write_text(json.dumps(manifest, indent=2))
         state = cpu_tree(policies.state_dict())
         state['fingerprint'] = fingerprint
-        state['schedulers'] = {mode: schedulers[mode].state_dict() if schedulers else None for mode in MODES}
+        state['schedulers'] = {mode: schedulers[mode].state_dict() if schedulers else None for mode in ADAPTERS}
         state['rng'] = {'python': random.getstate(), 'numpy': np.random.get_state(),
                         'torch': torch.get_rng_state()}
         if torch.cuda.is_initialized():
             state['rng']['cuda'] = torch.cuda.get_rng_state_all()
         torch.save(state, temporary / 'training_state.pt')
-        info = {'protocol_version': PROTOCOL, 'fingerprint': fingerprint,
+        info = {'protocol_version': PROTOCOL, 'adapter_layout_version': ADAPTER_LAYOUT,
+            'mode_to_adapter': dict(ADAPTER_FOR_MODE), 'fingerprint': fingerprint,
             'adapter_versions': policies.versions,
             'training_state_sha256': hashlib.sha256((temporary / 'training_state.pt').read_bytes()).hexdigest()}
         (temporary / 'checkpoint.json').write_text(json.dumps(info, indent=2))
@@ -69,7 +70,10 @@ def save(path, policies, base_path, fingerprint, schedulers=None):
 def load_state(path, policies, fingerprint, schedulers=None):
     path = Path(path)
     info = json.loads((path / 'checkpoint.json').read_text())
-    if info['protocol_version'] != PROTOCOL or info['fingerprint'] != fingerprint:
+    if (info.get('protocol_version') != PROTOCOL or info.get('fingerprint') != fingerprint or
+            info.get('adapter_layout_version') != ADAPTER_LAYOUT or
+            info.get('mode_to_adapter') != ADAPTER_FOR_MODE or
+            set(info.get('adapter_versions', {})) != set(ADAPTERS)):
         raise ValueError('Incompatible role checkpoint protocol/config/data/model')
     state_path = path / 'training_state.pt'
     if hashlib.sha256(state_path.read_bytes()).hexdigest() != info['training_state_sha256']:
@@ -77,7 +81,7 @@ def load_state(path, policies, fingerprint, schedulers=None):
     state = torch.load(state_path, map_location='cpu', weights_only=False)
     policies.load_state_dict(state)
     if schedulers:
-        for mode in MODES:
+        for mode in ADAPTERS:
             if state['schedulers'][mode] is None:
                 raise ValueError('Missing role scheduler state: ' + mode)
             schedulers[mode].load_state_dict(state['schedulers'][mode])

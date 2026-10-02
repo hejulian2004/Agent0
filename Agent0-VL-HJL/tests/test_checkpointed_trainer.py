@@ -38,7 +38,7 @@ def test_all_rollouts_and_references_finish_before_role_updates(monkeypatch, tra
 
     class Batch:
         def __init__(self, mode):
-            self.meta_info = {'role_mode': mode}
+            self.meta_info = {'role_mode': mode, 'valid_group_count': 1, 'policy_version': '0'}
 
         def union(self, other):
             events.append('union:' + self.meta_info['role_mode'])
@@ -48,8 +48,8 @@ def test_all_rollouts_and_references_finish_before_role_updates(monkeypatch, tra
             events.append('rollout:all')
             return SimpleNamespace(non_tensor_batch={'checkpointed_records': []})
 
-        def update_actor(self, batch):
-            events.append('update:' + batch.meta_info['role_mode'])
+        def update_checkpointed_actor(self, **batches):
+            events.append('update:joint:' + ','.join(batches))
             return SimpleNamespace(meta_info={'metrics': {'loss': [1.0]}})
 
     class Reference:
@@ -68,9 +68,7 @@ def test_all_rollouts_and_references_finish_before_role_updates(monkeypatch, tra
     expected = ['rollout:all', 'ref:solve', 'union:solve', 'ref:repair', 'union:repair']
     if train_verifier:
         expected += ['ref:verify', 'union:verify']
-    expected += ['update:solve', 'update:repair']
-    if train_verifier:
-        expected += ['update:verify']
+    expected += ['update:joint:solve,repair' + (',verify' if train_verifier else '')]
     assert events == expected
     assert metrics['before_accuracy_observed'] == 0
 
@@ -113,7 +111,10 @@ def test_complete_native_episode_records_and_role_groups(monkeypatch, tmp_path,
             pass
 
         def add_request(self, key, prompt, params, lora_request=None):
-            mode = lora_request.lora_name.split('-')[0]
+            assert lora_request.lora_name == 'shared-v0'
+            prompt_text = tokenizer.decode(prompt['prompt_token_ids'])
+            mode = ('verify' if 'You are an independent Verifier-Repair.' in prompt_text else
+                    'repair' if 'Repair Mode:' in prompt_text else 'solve')
             self.modes.append(mode)
             if mode == 'verify':
                 wrong = 'FINAL_ANSWER: 3' in tokenizer.decode(prompt['prompt_token_ids'])
@@ -145,7 +146,7 @@ def test_complete_native_episode_records_and_role_groups(monkeypatch, tmp_path,
     rollout = SimpleNamespace(model_adapter=QwenModelAdapter(tokenizer), tokenizer=tokenizer,
         processor=processor, registry=get_tool_registry(), model_path='cpu-base',
         inference_engine=SimpleNamespace(llm_engine=engine), sampling_params=SimpleNamespace())
-    adapters = NativeRoleLoRA(engine, {mode: tmp_path / mode for mode in ('solve', 'repair', 'verify')},
+    adapters = NativeRoleLoRA(engine, {'shared': tmp_path / 'shared'},
         request_factory=lambda name, identity, path: SimpleNamespace(lora_name=name, lora_int_id=identity))
     trajectories = [CanonicalTrajectory(str(index), rollout.registry.definitions(), items=[
         {'type': 'message', 'role': 'system', 'content': role_prompt('solve')},
@@ -158,9 +159,12 @@ def test_complete_native_episode_records_and_role_groups(monkeypatch, tmp_path,
     records = generate_records(rollout, prompts, settings, adapters, None, 0)
     adapters.end_rollout()
     batches, flows = pack_records(records.non_tensor_batch['checkpointed_records'], settings, processor, 0, 4)
+    assert {s['raw_rollout']['policy_version'] for flow in flows for s in flow['sessions']} == {'0'}
+    assert {s['trajectory']['metadata']['adapter'] for flow in flows for s in flow['sessions']} == {'shared'}
+    assert {s['trajectory']['metadata']['native_lora_id'] for flow in flows for s in flow['sessions']} == {1}
     assert len(flows) == 32 and all(flow['accepted'] for flow in flows)
     assert len(batches['solve']) == 32 and len(batches['repair']) == 128
-    assert 'verify' in engine.modes  # Frozen Verifier still performs every check.
+    assert 'verify' in engine.modes  # Verify loss can be disabled while every check still runs.
     assert (len(batches['verify']) == 128) if train_verifier else batches['verify'] is None
     assert all(flow['attempts'][0]['correct'] == 0 and flow['attempts'][-1]['correct'] == 1 for flow in flows)
     assert all(flow['transitions'][0]['reward'] == 1 for flow in flows)

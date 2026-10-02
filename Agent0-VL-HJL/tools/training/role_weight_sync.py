@@ -4,16 +4,16 @@ from pathlib import Path
 import shutil
 import uuid
 
-from agent0_protocol.checkpointed import MODES
+from agent0_protocol.checkpointed import ADAPTERS
 
 
 def split_weights(state, model):
     from peft import get_peft_model_state_dict
 
-    if set(model.peft_config) != set(MODES):
-        raise ValueError('Expected exactly three role adapters')
+    if set(model.peft_config) != set(ADAPTERS):
+        raise ValueError('Expected exactly one shared adapter')
     adapters = {mode: get_peft_model_state_dict(model, state_dict=state,
-        adapter_name=mode, save_embedding_layers=False) for mode in MODES}
+        adapter_name=mode, save_embedding_layers=False) for mode in ADAPTERS}
     for weights in adapters.values():
         for name in list(weights):
             if 'visual' in name:
@@ -45,7 +45,7 @@ def save_snapshots(path, weights, peft_configs):
     temporary = path.with_name(path.name + '.tmp-' + uuid.uuid4().hex)
     temporary.mkdir()
     try:
-        for mode in MODES:
+        for mode in ADAPTERS:
             directory = temporary / mode
             directory.mkdir()
             peft_configs[mode].save_pretrained(directory)
@@ -56,4 +56,4 @@ def save_snapshots(path, weights, peft_configs):
     except BaseException:
         shutil.rmtree(temporary)
         raise
-    return {mode: str(path / mode) for mode in MODES}
+    return {mode: str(path / mode) for mode in ADAPTERS}

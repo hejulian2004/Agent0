@@ -15,6 +15,9 @@ from .verifier import extract_json_dict
 
 PROTOCOL = 'agent0.checkpointed.v1'
 MODES = ('solve', 'repair', 'verify')
+ADAPTERS = ('shared',)
+ADAPTER_FOR_MODE = dict.fromkeys(MODES, 'shared')
+ADAPTER_LAYOUT = 'agent0.checkpointed.shared_lora.v1'
 
 
 def digest(value):
@@ -63,10 +66,8 @@ def validate_config(settings, training=False):
         raise ProtocolError('invalid_tool_bonus_cap')
     if not 0 <= rewards['beta_keep'] < rewards['beta_fix']:
         raise ProtocolError('tool_bonus_coefficients_must_be_ordered')
-    if settings['adapter_strategy'] not in ('separate', 'shared'):
+    if settings['adapter_strategy'] != 'shared':
         raise ProtocolError('invalid_adapter_strategy')
-    if settings['adapter_strategy'] == 'shared':
-        raise ProtocolError('shared_adapter_execution_not_implemented')
     if set(settings['ablation']) != {'context_isolation', 'suffix_repair', 'train_verifier_rl'}:
         raise ProtocolError('unknown_or_missing_ablation_flag')
     for name in ('context_isolation', 'suffix_repair', 'train_verifier_rl'):
@@ -78,9 +79,15 @@ def validate_config(settings, training=False):
             raise ProtocolError('invalid_adapter_parameter:' + name)
     if adapters['modes'] != list(MODES):
         raise ProtocolError('adapter_modes_must_match_protocol')
-    count = len(MODES) if settings['adapter_strategy'] == 'separate' else 1
+    count = len(ADAPTERS)
     if adapters['max_loras'] < count or adapters['max_cpu_loras'] < adapters['max_loras']:
         raise ProtocolError('insufficient_adapter_slots')
+    weighting = settings['joint_training']['rl_weighting']
+    if weighting['method'] != 'prior_sqrt_groups' or set(weighting['priors']) != set(MODES):
+        raise ProtocolError('invalid_joint_weighting')
+    if any(isinstance(p, bool) or not isinstance(p, (int, float)) or not math.isfinite(p) or p < 0
+           for p in weighting['priors'].values()) or not any(weighting['priors'].values()):
+        raise ProtocolError('invalid_mode_priors')
     statistics = settings['statistics']
     if not 0 < statistics['coverage_target'] <= 1 or any(not 0 <= q <= 1 for q in statistics['quantiles']):
         raise ProtocolError('invalid_statistics_quantile')

@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from agent0_protocol.checkpointed import PROTOCOL, MODES
+from agent0_protocol.checkpointed import PROTOCOL, MODES, ADAPTER_LAYOUT, ADAPTER_FOR_MODE
 from agent0_protocol.checkpointed_training import sft_rows
 from tools.data_builder.checkpointed_quality import audit_flow
 from tools.data_builder.sft_stream import _write_state
@@ -35,6 +35,18 @@ def export(data, output):
             'mode': mode, 'rows': len(rows), 'accepted_problems': manifest['rows'],
             'source_sha256': manifest['sha256'],
             'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
+    shared = [row for mode in MODES for row in mode_rows[mode]]
+    shared_path = output / 'shared.jsonl'
+    temporary = shared_path.with_suffix('.tmp')
+    temporary.write_text(''.join(json.dumps(row, ensure_ascii=False) + '\n' for row in shared))
+    temporary.replace(shared_path)
+    _write_state(shared_path.with_suffix('.manifest.json'), {
+        'protocol': PROTOCOL, 'adapter_layout_version': ADAPTER_LAYOUT,
+        'adapter': 'shared', 'mode_to_adapter': ADAPTER_FOR_MODE, 'modes': list(MODES),
+        'rows': len(shared), 'rows_by_mode': counts, 'source_sha256': manifest['sha256'],
+        'mode_sha256': {mode: hashlib.sha256((output / (mode + '.jsonl')).read_bytes()).hexdigest()
+                        for mode in MODES},
+        'sha256': hashlib.sha256(shared_path.read_bytes()).hexdigest()})
     _write_state(output / 'roles.json', {'protocol': PROTOCOL, 'rows_by_mode': counts,
         'source': str(data), 'source_sha256': manifest['sha256']})
     return counts

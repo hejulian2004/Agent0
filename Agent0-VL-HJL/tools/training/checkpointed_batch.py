@@ -26,6 +26,8 @@ def pack_role(sessions, states, mode, settings, processor, pad_token_id, world_s
     for group in groups.values():
         if not all(advantages[s.spec.session_id]['loss_mask'] for s in group):
             continue
+        if not all(any(s.raw_rollout['sampling_mask']) for s in group):
+            continue
         if len({digest(s.spec.initial_items) for s in group}) != 1:
             raise ProtocolError('grpo_group_input_mismatch')
         if len({s.raw_rollout['policy_version'] for s in group}) != 1:
@@ -33,6 +35,11 @@ def pack_role(sessions, states, mode, settings, processor, pad_token_id, world_s
         rows.extend((s, advantages[s.spec.session_id]['advantage'], False) for s in group)
     if not rows:
         return None
+    valid_group_count = len(rows) // sizes[mode]
+    versions = {s.raw_rollout['policy_version'] for s, _, _ in rows}
+    if len(versions) != 1:
+        raise ProtocolError('policy_changed_across_role_groups')
+    policy_version = next(iter(versions))
     # Pad the tail with whole zero-loss groups; never split a GRPO group.
     group_size = sizes[mode]
     mini = settings['sampling']['ppo_minibatch_groups'] * group_size
@@ -77,4 +84,6 @@ def pack_role(sessions, states, mode, settings, processor, pad_token_id, world_s
         'session_id': object_array([s.spec.session_id for s, _, _ in rows]),
         'dummy_group': np.array([dummy for _, _, dummy in rows], dtype=bool)},
         meta_info={'role_mode': mode, 'ppo_mini_batch_size': mini,
+                   'valid_group_count': valid_group_count, 'group_size': sizes[mode],
+                   'policy_version': policy_version,
                    'global_token_num': attention.sum(-1).tolist()})

@@ -236,6 +236,7 @@ class ActorRolloutRefWorker(Worker):
                     self.role_policies = policies
                 else:
                     self.role_reference = policies
+                    policies.optimizers.clear()
             elif role == 'actor' and self.config.rollout.get('local_protocol', False):
                 from peft import LoraConfig, TaskType, get_peft_model
                 actor_module.enable_input_require_grads()
@@ -308,15 +309,15 @@ class ActorRolloutRefWorker(Worker):
         # TODO: add more optimizer args into config
         if role == 'actor' and optim_config is not None:
             from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
-            actor_optimizer = optim.AdamW(actor_module_fsdp.parameters(),
-                                          lr=optim_config.lr,
-                                          betas=optim_config.get('betas', (0.9, 0.999)),
-                                          weight_decay=optim_config.get('weight_decay', 1e-2))
             if self.config.rollout.get('checkpointed', None):
                 self.role_policies._setup_optimizers(optim_config.lr,
                     betas=optim_config.get('betas', (0.9, 0.999)),
                     weight_decay=optim_config.get('weight_decay', 1e-2))
-                actor_optimizer = self.role_policies.optimizers['solve']
+                actor_optimizer = self.role_policies.optimizers['shared']
+            else:
+                actor_optimizer = optim.AdamW(actor_module_fsdp.parameters(),
+                    lr=optim_config.lr, betas=optim_config.get('betas', (0.9, 0.999)),
+                    weight_decay=optim_config.get('weight_decay', 1e-2))
 
             total_steps = optim_config.get('total_training_steps', 0)
             num_warmup_steps = int(optim_config.get('lr_warmup_steps', -1))
@@ -337,13 +338,7 @@ class ActorRolloutRefWorker(Worker):
             else:
                 raise NotImplementedError(f'Warmup style {warmup_style} is not supported')
             if self.config.rollout.get('checkpointed', None):
-                self.role_schedulers = {'solve': actor_lr_scheduler}
-                for mode in ('repair', 'verify'):
-                    optimizer = self.role_policies.optimizers[mode]
-                    self.role_schedulers[mode] = (
-                        get_constant_schedule_with_warmup(optimizer, num_warmup_steps)
-                        if warmup_style == 'constant' else
-                        get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, total_steps))
+                self.role_schedulers = {'shared': actor_lr_scheduler}
         else:
             actor_optimizer = None
             actor_lr_scheduler = None
@@ -534,18 +529,7 @@ class ActorRolloutRefWorker(Worker):
 
         assert self._is_actor
         if self.config.rollout.get('checkpointed', None):
-            mode = data.meta_info['role_mode']
-            if self.role_policies.rollout_versions is not None:
-                raise RuntimeError('Cannot update a policy during rollout')
-            self.role_policies.select_fsdp(mode)
-            self.actor_optimizer = self.role_policies.optimizers[mode]
-            self.actor.actor_optimizer = self.actor_optimizer
-            self.actor_lr_scheduler = self.role_schedulers[mode]
-            dp = self.device_mesh.size() // self.ulysses_sequence_parallel_size
-            mini = int(data.meta_info['ppo_mini_batch_size'])
-            if mini % dp:
-                raise ValueError('Role PPO minibatch must divide data parallel size')
-            self.config.actor.ppo_mini_batch_size = mini // dp
+            raise RuntimeError('Shared checkpointed policy requires the joint update RPC')
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         if self._is_offload_optimizer:
@@ -568,8 +552,6 @@ class ActorRolloutRefWorker(Worker):
             metrics['perf/cpu_memory_used_gb'] = psutil.virtual_memory().used / (1024**3)
 
             self.actor_lr_scheduler.step()
-            if self.config.rollout.get('checkpointed', None):
-                self.role_policies.versions[mode] += 1
             lr = self.actor_lr_scheduler.get_last_lr()[0]
             metrics['actor/lr'] = lr
 
@@ -587,6 +569,58 @@ class ActorRolloutRefWorker(Worker):
             offload_fsdp_optimizer(optimizer=self.actor_optimizer)
 
         return output
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def update_checkpointed_actor(self, **batches):
+        """Separate mode batches share one atomic policy-version update."""
+        from tools.training.checkpointed_update import update_joint_policy, mode_weights
+        from agent0_protocol.checkpointed import MODES
+        from omegaconf import OmegaConf
+        if not self._is_actor or not self.config.rollout.get('checkpointed', None):
+            raise RuntimeError('Joint update requires a checkpointed Actor')
+        if self.role_policies.rollout_versions is not None:
+            raise RuntimeError('Cannot update a policy during rollout')
+        if not batches or not set(batches) <= set(MODES):
+            raise ValueError('Invalid joint mode batches')
+        if not self.config.rollout.checkpointed.ablation.train_verifier_rl and 'verify' in batches:
+            raise ValueError('Verifier RL is disabled')
+        settings = OmegaConf.to_container(self.config.rollout.checkpointed, resolve=True)
+        counts = {mode: batch.meta_info['valid_group_count'] for mode, batch in batches.items()}
+        weights = mode_weights(counts, settings)
+        phases = {batch.meta_info['update_phase_id'] for batch in batches.values()}
+        versions = {str(batch.meta_info['policy_version']) for batch in batches.values()}
+        if len(phases) != 1 or versions != {str(self.role_policies.versions['shared'])}:
+            raise RuntimeError('Stale or inconsistent shared rollout batch')
+        phase = next(iter(phases))
+        if any(batch.meta_info['joint_weights'] != weights for batch in batches.values()):
+            raise RuntimeError('Inconsistent global mode weights')
+        self.role_policies.claim_update(phase, next(iter(versions)))
+        self.role_policies.select_fsdp('solve')
+        self.actor_optimizer = self.role_policies.optimizers['shared']
+        self.actor.actor_optimizer = self.actor_optimizer
+        self.actor_lr_scheduler = self.role_schedulers['shared']
+        if self._is_offload_param:
+            load_fsdp_model_to_gpu(self.actor_module_fsdp)
+        if self._is_offload_optimizer:
+            load_fsdp_optimizer(self.actor_optimizer, device_id=torch.cuda.current_device())
+        try:
+            with self.ulysses_sharding_manager:
+                prepared = {mode: self.ulysses_sharding_manager.preprocess_data(
+                    data=batches[mode].to(torch.cuda.current_device())) for mode in MODES if mode in batches}
+                dp = self.device_mesh.size() // self.ulysses_sequence_parallel_size
+                metrics, updated = update_joint_policy(self.actor, prepared, weights, dp)
+                if updated:
+                    self.actor_lr_scheduler.step()
+                    self.role_policies.versions['shared'] += 1
+                metrics['adapter/shared_version'] = self.role_policies.versions['shared']
+                metrics['actor/lr'] = self.actor_lr_scheduler.get_last_lr()[0]
+                output = DataProto(meta_info={'metrics': metrics})
+                return self.ulysses_sharding_manager.postprocess_data(output).to('cpu')
+        finally:
+            if self._is_offload_param:
+                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+            if self._is_offload_optimizer:
+                offload_fsdp_optimizer(self.actor_optimizer)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def generate_checkpointed_records(self, prompts: DataProto):

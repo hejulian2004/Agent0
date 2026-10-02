@@ -8,7 +8,7 @@ import os
 import time
 from pathlib import Path
 
-from agent0_protocol.checkpointed import SessionResult, digest, text_of, tool_metrics
+from agent0_protocol.checkpointed import SessionResult, digest, text_of, tool_metrics, ADAPTER_FOR_MODE, ADAPTER_LAYOUT
 from agent0_protocol.schema import CanonicalTrajectory, RawRollout, ProtocolError
 from agent0_protocol.tools import ToolExecutionContext, input_image_from_items
 from tools.canonical_multimodal import item_images, load_image
@@ -22,6 +22,9 @@ class CheckpointedSessionState(TrajectoryState):
         self.trajectory = CanonicalTrajectory(spec.session_id, spec.tools,
             items=copy.deepcopy(spec.initial_items), metadata={
                 'protocol_version': settings['protocol_version'], 'mode': spec.mode,
+                'adapter': ADAPTER_FOR_MODE[spec.mode], 'adapter_layout_version': ADAPTER_LAYOUT,
+                'native_lora_id': getattr(adapter_request, 'lora_int_id', None),
+                'policy_version': str(policy_version),
                 'session_id': spec.session_id, 'loss_start_item_index': len(spec.initial_items)})
         self.tokens, self.mask, self.logprobs = [], [], []
         self.images = [load_image(v) for item in spec.initial_items for v in item_images(item)]
@@ -167,7 +170,7 @@ def run_episodes(episodes, rollout, settings, adapters, output_root, group=None,
         states = []
         for spec in specs:
             state = CheckpointedSessionState(rollout, spec, settings, output_root,
-                adapters.request(spec.mode), versions[spec.mode])
+                adapters.request(spec.mode), versions[ADAPTER_FOR_MODE[spec.mode]])
             owners[spec.session_id] = index
             states_by_id[spec.session_id] = state
             states.append(state)
