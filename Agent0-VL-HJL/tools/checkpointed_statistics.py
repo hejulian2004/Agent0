@@ -20,6 +20,7 @@ def quantile(values, q):
 def summarize(flows, settings):
     samples, failures, transitions = defaultdict(list), Counter(), Counter()
     counts = Counter()
+    actions = Counter()
     for flow in flows:
         if flow.get('protocol_version') != settings['protocol_version']:
             raise ValueError('incompatible audit protocol')
@@ -37,6 +38,9 @@ def summarize(flows, settings):
         for transition in flow['transitions']:
             if transition['before'] is not None and transition['after'] is not None:
                 transitions[f"{transition['before']}->{transition['after']}"] += 1
+                actions[f"{transition.get('action', 'unknown')}:{transition['before']}->{transition['after']}"] += 1
+            if transition.get('repair_success_rate') is not None:
+                samples['repair_success_rate'].append(transition['repair_success_rate'])
     stats = settings['statistics']
     distributions = {key: {'count': len(values), 'max': max(values),
         'quantiles': {str(q): quantile(values, q) for q in stats['quantiles']}}
@@ -47,7 +51,7 @@ def summarize(flows, settings):
             value = quantile(values, stats['coverage_target']) * (1 + stats['token_margin_ratio'])
             alignment = stats['token_alignment']
             suggestions[key.split(':')[0] + '_response_tokens'] = math.ceil(value / alignment) * alignment
-    return {'counts': dict(counts), 'transitions': dict(transitions), 'failures': dict(failures),
+    return {'counts': dict(counts), 'transitions': dict(transitions), 'actions': dict(actions), 'failures': dict(failures),
             'distributions': distributions, 'suggested_limits': suggestions,
             'censoring_warning': 'Budget-exhausted samples are lower bounds; do not infer uncensored maxima.',
             'config_modified': False}

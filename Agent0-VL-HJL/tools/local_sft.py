@@ -32,7 +32,8 @@ def prepare(data, model, output, max_length=30720, expected_rows=1000):
         if checkpointed_mode:
             from agent0_protocol.checkpointed import role_prompt
             trajectory.validate()
-            if trajectory.metadata.get('mode') != checkpointed_mode or trajectory.items[0]['content'] != role_prompt(checkpointed_mode):
+            if trajectory.metadata.get('mode') != checkpointed_mode or trajectory.items[0]['content'] != role_prompt(
+                    checkpointed_mode, checkpointed=trajectory.metadata.get('repair_strategy', 'suffix') != 'full'):
                 raise ProtocolError('role_prompt_or_mode_mismatch')
             if trajectory.metadata.get('loss_start_item_index') is None:
                 raise ProtocolError('missing_role_loss_boundary')

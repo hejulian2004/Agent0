@@ -68,8 +68,47 @@ Print the manual command without loading models or allocating a GPU:
 `--preflight-only` checks actual bundle/data identity without launching training.
 Tune limits, role group sizes, rewards and scheduling in config.yaml. Existing
 datasets/checkpoints are not converted. New data and adapter exports are required.
-Shared-adapter/non-default ablation execution and formal-from-checkpoint remain
-explicitly unsupported; compatible full-run resume is supported.
+Shared-adapter execution and formal-from-checkpoint remain explicitly unsupported;
+compatible full-run resume is supported.
+
+### Action-conditioned rewards and ablations
+
+`transition_reward` requires the parsed Verifier action. Wrong-answer accept gets
+`false_accept=-1`; correct-answer accept gets preservation plus keep-tool bonus.
+Successful intervention gets fix plus fix-tool bonus; failed intervention gets
+`failed_fix=0` (configurable); intervention preserving an already correct answer
+gets `unnecessary_revision=0`, without any tool bonus. Corruption gets -1.
+`uncertain` is a repair-triggering intervention and follows the revise reward rules;
+its action remains distinct in audit/statistics. These are final-answer outcomes,
+not correctness labels for individual critiques.
+
+`rewards.repair_credit_mode=main` uses the predetermined completion; `mean` averages
+the action-conditioned reward across every Repair completion under the same feedback.
+Any unavailable/infrastructure outcome masks mean credit. The continuing trajectory
+always uses the fixed main completion. Logs keep the main binary transition separately
+from `repair_outcomes` and `repair_success_rate`.
+
+The three boolean ablation switches now execute different behavior:
+
+| Variant | context_isolation | suffix_repair | train_verifier_rl | tool_bonus_enabled |
+| --- | --- | --- | --- | --- |
+| A | true | false | false | false |
+| B | true | true | false | false |
+| C | true | true | true | false |
+| Full | true | true | true | true |
+
+The original baseline remains the legacy `local_4090` profile. For an isolation-only
+comparison against Full, set only `context_isolation=false`.
+False isolation inherits current Solver messages and current image state, while
+Python remains stateless between snippets. Inherited Solver calls never earn V tool
+bonus or V policy loss. False suffix repair supplies ordinary verification feedback
+and regenerates from the original problem, with no accepted prefix or checkpoint in
+the Repair model input. A checkpoint may still be retained for audit/branch identity.
+False Verifier RL keeps all checks and delayed-reward auditing but builds no V Actor
+batch, performs no V reference computation and does not update its adapter/optimizer.
+These switches isolate the Verifier outcome-training effect; S/R outcome RL remains
+enabled. Use fixed RL problems and the same initial adapter bundle across variants.
+Configuration/code fingerprints reject incompatible resume; no stored data is rewritten.
 
 CPU/Gloo session coverage verifies one real tool execution on the leader, image
 state broadcast, and matching token/logprob histories across ranks. A real two-rank

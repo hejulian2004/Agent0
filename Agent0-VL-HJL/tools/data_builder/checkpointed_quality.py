@@ -69,7 +69,8 @@ def audit_flow(flow):
         trajectory = CanonicalTrajectory.from_dict(session['trajectory'])
         if trajectory.items[:len(spec['initial_items'])] != spec['initial_items']:
             raise ProtocolError('session_input_changed')
-        if trajectory.items[0]['content'] != role_prompt(spec['mode']):
+        if trajectory.items[0]['content'] != role_prompt(spec['mode'],
+                checkpointed=spec['mode'] != 'repair' or spec.get('checkpoint') is not None):
             raise ProtocolError('role_prompt_mismatch')
         trajectory.validate(complete=not bool(session['failure_kind']))
     if flow['accepted']:

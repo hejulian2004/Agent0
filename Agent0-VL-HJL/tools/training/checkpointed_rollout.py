@@ -142,6 +142,9 @@ class CheckpointedSessionState(TrajectoryState):
                 [t for t, selected in zip(ids[start:], masks[start:]) if selected],
                 policy_version=str(self.policy_version), model_version=self.rollout.model_path)
             self.trajectory.rollout = raw.to_dict()
+            state = self.context.checkpoint()
+            state['owned_paths'] = sorted(state['owned_paths'])
+            self.trajectory.metadata['image_state'] = state
             self.result.raw_rollout = raw.to_dict()
             self.result.steps = self.steps
             self.result.trajectory = self.trajectory.to_dict()

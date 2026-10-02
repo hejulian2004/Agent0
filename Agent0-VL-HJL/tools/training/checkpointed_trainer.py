@@ -52,6 +52,18 @@ def role_step(trainer, batch):
             key = f'{before_value}->{after_value}'
             metrics['transition/' + key + '_count'] = transitions.get(key, 0)
             metrics['transition/' + key + '_rate'] = transitions.get(key, 0) / total if total else 0.0
+    for before_value, action, name in [(0, 'accept', 'false_accept'), (1, 'revise', 'unnecessary_revision')]:
+        considered = [transition for flow in flows for transition in flow['transitions']
+                      if transition['before'] == before_value]
+        count = sum(transition['action'] == action or
+                    (action == 'revise' and transition['action'] == 'uncertain') for transition in considered)
+        metrics['verifier/' + name + '_count'] = count
+        metrics['verifier/' + name + '_rate'] = count / len(considered) if considered else 0.0
+        metrics['verifier/' + name + '_observed'] = len(considered)
+    rates = [transition['repair_success_rate'] for flow in flows for transition in flow['transitions']
+             if transition.get('repair_success_rate') is not None]
+    metrics['verifier/repair_success_rate'] = sum(rates) / len(rates) if rates else 0.0
+    metrics['verifier/repair_success_rate_observed'] = len(rates)
     for mode in MODES:
         rewards = [s['reward'] for flow in flows for s in flow['sessions']
                    if s['spec']['mode'] == mode and s['spec']['trainable'] and s['reward'] is not None]

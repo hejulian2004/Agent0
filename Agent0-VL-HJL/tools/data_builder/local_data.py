@@ -81,7 +81,8 @@ def preflight(root, config):
         from agent0_protocol.checkpointed import MODES, role_prompt, validate_config
         validate_config(config['checkpointed'])
         result['protocol_version'] = config['checkpointed']['protocol_version']
-        result['role_prompt_sha256'] = {mode: hashlib.sha256(role_prompt(mode).encode()).hexdigest() for mode in MODES}
+        result['role_prompt_sha256'] = {mode: hashlib.sha256(role_prompt(mode,
+            checkpointed=mode != 'repair' or config['checkpointed']['ablation']['suffix_repair']).encode()).hexdigest() for mode in MODES}
     return result
 
 

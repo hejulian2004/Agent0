@@ -633,6 +633,9 @@ profiles:
       rewards:
         fix: 1.0
         failed_fix: 0.0
+        false_accept: -1.0
+        unnecessary_revision: 0.0
+        repair_credit_mode: main  # main: fixed completion; mean: expected reward over all repairs
         preservation: 0.2
         corruption: -1.0
         beta_fix: 0.03

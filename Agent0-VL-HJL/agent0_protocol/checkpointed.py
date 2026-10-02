@@ -51,7 +51,10 @@ def validate_config(settings, training=False):
     if training and min(sampling[n] for n in ('solve_n', 'verify_n', 'repair_n')) < 2:
         raise ProtocolError('grpo_requires_multiple_samples')
     for name, value in rewards.items():
-        if name == 'tool_bonus_enabled':
+        if name == 'repair_credit_mode':
+            if value not in ('main', 'mean'):
+                raise ProtocolError('invalid_repair_credit_mode')
+        elif name == 'tool_bonus_enabled':
             if type(value) is not bool:
                 raise ProtocolError('invalid_tool_bonus_flag')
         elif isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
@@ -64,8 +67,11 @@ def validate_config(settings, training=False):
         raise ProtocolError('invalid_adapter_strategy')
     if settings['adapter_strategy'] == 'shared':
         raise ProtocolError('shared_adapter_execution_not_implemented')
-    if not all(settings['ablation'].values()):
-        raise ProtocolError('nondefault_ablation_execution_not_implemented')
+    if set(settings['ablation']) != {'context_isolation', 'suffix_repair', 'train_verifier_rl'}:
+        raise ProtocolError('unknown_or_missing_ablation_flag')
+    for name in ('context_isolation', 'suffix_repair', 'train_verifier_rl'):
+        if type(settings['ablation'][name]) is not bool:
+            raise ProtocolError('invalid_ablation_flag:' + name)
     adapters = settings['adapters']
     for name in ('rank', 'alpha', 'max_loras', 'max_cpu_loras'):
         if type(adapters[name]) is not int or adapters[name] <= 0:
@@ -82,7 +88,7 @@ def validate_config(settings, training=False):
         raise ProtocolError('invalid_statistics_margin')
 
 
-def role_prompt(mode):
+def role_prompt(mode, checkpointed=True):
     runtime = ('Python snippets receive image_path and a private output_dir. '
                'Use these variables rather than inventing paths. Save new images under output_dir.\n')
     if mode == 'verify':
@@ -96,6 +102,11 @@ def role_prompt(mode):
                 'guidance (text), failed_solver_call_ids (Solver call ID list). '
                 'Cite supplied evidence IDs or tool:<call_id> for your real observations.\n' + runtime)
     if mode == 'repair':
+        if not checkpointed:
+            return (render_system_prompt() + 'Repair Mode: solve the original problem again from '
+                    'the beginning using the external verification feedback. Produce a complete '
+                    'new trajectory; no previous prefix or suffix is retained. '
+                    'End with FINAL_ANSWER: <answer> (choice letter only for MCQ).\n' + runtime)
         return (render_system_prompt() + 'Repair Mode: preserve the supplied prefix and regenerate '
                 'the entire suffix from the checkpoint boundary. Do not reuse the discarded suffix. '
                 'Produce self-contained reasoning, without referring to hidden verifier dialogue. '
@@ -195,10 +206,11 @@ def last_text(result):
 
 
 def valid_unique_tools(result):
-    outputs = {i['call_id']: i['output'] for i in result.trajectory['items']
+    items = result.trajectory['items'][len(result.spec.initial_items):]
+    outputs = {i['call_id']: i['output'] for i in items
                if i['type'] == 'function_call_output'}
     unique = set()
-    for item in result.trajectory['items']:
+    for item in items:
         if item['type'] != 'function_call':
             continue
         output = outputs.get(item['call_id'], {})
@@ -239,13 +251,37 @@ def tool_metrics(result):
 def transition_reward(before, after, result, settings):
     if before is None or after is None or result.failure_kind == 'infrastructure':
         return None
+    if before not in (0, 1) or after not in (0, 1):
+        raise ProtocolError('transition_outcomes_must_be_binary')
     r = settings['rewards']
+    action = (result.verification or {}).get('verdict')
+    if action not in ('accept', 'revise', 'uncertain'):
+        raise ProtocolError('transition_requires_verifier_action')
     n = min(valid_unique_tools(result), r['tool_bonus_max_calls']) if r['tool_bonus_enabled'] else 0
+    if action == 'accept':
+        if after != before:
+            raise ProtocolError('accept_cannot_change_outcome')
+        return (r['preservation'] + r['beta_keep'] * n) if before == 1 else r['false_accept']
     if (before, after) == (0, 1):
         return r['fix'] + r['beta_fix'] * n
     if (before, after) == (1, 1):
-        return r['preservation'] + r['beta_keep'] * n
+        return r['unnecessary_revision']
     return r['corruption'] if before == 1 else r['failed_fix']
+
+
+def repair_transition_reward(before, completions, result, settings, main):
+    """Expected action reward; outcomes never select the continuing branch."""
+    outcomes = [completion.correct for completion in completions]
+    if settings['rewards']['repair_credit_mode'] == 'main':
+        reward = transition_reward(before, outcomes[main], result, settings)
+    elif any(value is None or completion.failure_kind == 'infrastructure'
+             for value, completion in zip(outcomes, completions)):
+        reward = None
+    else:
+        values = [transition_reward(before, outcome, result, settings) for outcome in outcomes]
+        reward = sum(values) / len(values) if all(value is not None for value in values) else None
+    rate = sum(outcomes) / len(outcomes) if all(value is not None for value in outcomes) else None
+    return reward, outcomes, rate
 
 
 def evidence_snapshot(problem, current):
@@ -263,7 +299,8 @@ def evidence_snapshot(problem, current):
     return payload, evidence, images
 
 
-def review_specs(problem_id, problem, tools, current, attempt, count, main_index, terminal=False):
+def review_specs(problem_id, problem, tools, current, attempt, count, main_index, terminal=False,
+                 context_isolation=True):
     payload, evidence, images = evidence_snapshot(problem, current)
     evidence_hash = digest({'payload': payload, 'images': images})
     content = [{'type': 'input_text', 'text': 'Independently check this evidence snapshot:\n' +
@@ -271,10 +308,23 @@ def review_specs(problem_id, problem, tools, current, attempt, count, main_index
                *[{'type': 'input_image', 'image_url': image} for _, image in images]]
     initial = [{'type': 'message', 'role': 'system', 'content': role_prompt('verify')},
                {'type': 'message', 'role': 'user', 'content': content}]
+    image_path = None
+    if not context_isolation:
+        # Refer to real inherited items without duplicating their text/images;
+        # token-budget differences should not become a second ablation factor.
+        references = {'steps': payload['steps'],
+                      'evidence_indices': {key: int(key[1:]) for key in evidence}}
+        initial = [{'type': 'message', 'role': 'system', 'content': role_prompt('verify')},
+                   *copy.deepcopy(current['trajectory']['items'][1:]),
+                   {'type': 'message', 'role': 'user', 'content':
+                    'Check the preceding Solver conversation. Evidence IDs refer to history item indices:\n' +
+                    json.dumps(references, ensure_ascii=False)}]
+        image_path = current.get('state_after', {}).get('current_image_path')
     group = f'{problem_id}:verify:{attempt}:{evidence_hash}'
     return [SessionSpec(f'{group}:{n}', problem_id, 'verify', copy.deepcopy(initial), tools,
                         group, str(attempt), 'main' if n == main_index else 'shadow',
-                        not terminal, parent_id=current['session_id']) for n in range(count)], evidence, evidence_hash
+                        not terminal, parent_id=current['session_id'],
+                        initial_image_path=image_path) for n in range(count)], evidence, evidence_hash
 
 
 def make_checkpoint(review, current, verification, evidence):
@@ -299,24 +349,33 @@ def make_checkpoint(review, current, verification, evidence):
     return checkpoint, position
 
 
-def repair_specs(problem_id, problem, tools, current, checkpoint, position, count, main_branch):
+def repair_specs(problem_id, problem, tools, current, checkpoint, position, count, main_branch,
+                 suffix_repair=True):
     from tools.canonical_multimodal import item_images
+    if not suffix_repair:
+        position = 0
     boundary = current['steps'][position]['item_start']
     prefix = copy.deepcopy(current['trajectory']['items'][2:boundary])
+    if not suffix_repair:
+        prefix = []
     text_checkpoint = copy.deepcopy(checkpoint)
     text_checkpoint['evidence_payloads'] = {key: safe_text_item(value['item'])
                                           for key, value in checkpoint['evidence_payloads'].items()}
+    if not suffix_repair:
+        text_checkpoint = {key: text_checkpoint[key] for key in
+            ('critique', 'guidance', 'evidence', 'evidence_payloads', 'verdict')}
+        text_checkpoint['type'] = 'verification_feedback'
     content = [{'type': 'input_text', 'text': json.dumps(text_checkpoint, ensure_ascii=False)}]
     for value in checkpoint['evidence_payloads'].values():
         content.extend({'type': 'input_image', 'image_url': image} for image in item_images(value['item']))
-    initial = [{'type': 'message', 'role': 'system', 'content': role_prompt('repair')},
+    initial = [{'type': 'message', 'role': 'system', 'content': role_prompt('repair', checkpointed=suffix_repair)},
                copy.deepcopy(problem[1]), *prefix, {'type': 'message', 'role': 'user', 'content': content}]
     group = f'{problem_id}:repair:{checkpoint["checkpoint_id"]}'
-    image_path = current['steps'][position].get('state_before', {}).get('current_image_path')
+    image_path = current['steps'][position].get('state_before', {}).get('current_image_path') if suffix_repair else None
     specs = [SessionSpec(f'{group}:{n}', problem_id, 'repair', copy.deepcopy(initial), tools,
                          group, checkpoint['checkpoint_id'], 'main' if main_branch else 'shadow',
                          initial_image_path=image_path, first_step_number=position + 1,
-                         parent_id=current['session_id'], checkpoint=checkpoint) for n in range(count)]
+                         parent_id=current['session_id'], checkpoint=checkpoint if suffix_repair else None) for n in range(count)]
     return specs, boundary
 
 
@@ -339,6 +398,7 @@ def attempt_from_result(result, previous=None, position=None):
     return {'session_id': result.spec.session_id, 'attempt_id': result.spec.attempt_id,
             'trajectory': trajectory.to_dict(), 'steps': steps,
             'correct': result.correct, 'failure_kind': result.failure_kind,
+            'state_after': copy.deepcopy(result.trajectory.get('metadata', {}).get('image_state', {})),
             'failure_reason': result.failure_reason}
 
 
@@ -389,7 +449,8 @@ class Episode:
             terminal = round_index == limit
             count = 1 if terminal else sampling['teacher_verify_n' if self.teacher else 'verify_n']
             specs, evidence, evidence_hash = review_specs(self.problem_id, self.problem, self.tools,
-                current, round_index, count, main, terminal)
+                current, round_index, count, main, terminal,
+                context_isolation=self.settings['ablation']['context_isolation'])
             reviews = yield specs
             self.sessions.extend(reviews)
             selected = 0 if terminal else main
@@ -417,10 +478,13 @@ class Episode:
                     if review.failure_kind or review.verification['verdict'] == 'accept':
                         continue
                     checkpoint, position = make_checkpoint(review, current, review.verification, evidence)
+                    if not self.settings['ablation']['suffix_repair']:
+                        position = 0
                     self.checkpoints.append(checkpoint)
                     count = sampling['teacher_repair_n' if self.teacher else 'repair_n']
                     repair, boundary = repair_specs(self.problem_id, self.problem, self.tools, current,
-                        checkpoint, position, count, branch_index == selected)
+                        checkpoint, position, count, branch_index == selected,
+                        suffix_repair=self.settings['ablation']['suffix_repair'])
                     pending.append((branch_index, review, checkpoint, position, repair))
                 all_specs = [spec for _, _, _, _, repair in pending for spec in repair]
                 repaired = (yield all_specs) if all_specs else []
@@ -433,10 +497,13 @@ class Episode:
                         self.score(completion)
                     chosen = group[main]
                     after = attempt_from_result(chosen, current, position)
-                    review.reward = transition_reward(current['correct'], after['correct'], review, self.settings)
+                    review.reward, outcomes, success_rate = repair_transition_reward(
+                        current['correct'], group, review, self.settings, main)
                     self.transitions.append({'session_id': review.spec.session_id, 'branch': review.spec.branch,
                         'checkpoint_id': checkpoint['checkpoint_id'], 'before': current['correct'],
                         'after': after['correct'], 'action': review.verification['verdict'],
+                        'repair_outcomes': outcomes, 'repair_success_rate': success_rate,
+                        'credit_mode': self.settings['rewards']['repair_credit_mode'],
                         'reward': review.reward, 'round': round_index})
                     if branch_index == selected:
                         next_current = after

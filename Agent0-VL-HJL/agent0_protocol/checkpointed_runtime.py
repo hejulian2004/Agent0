@@ -140,6 +140,9 @@ class CheckpointedResponsesRunner:
         except ProtocolError as exc:
             result.failure_kind, result.failure_reason = 'model', str(exc)
         finally:
+            state = context.checkpoint()
+            state['owned_paths'] = sorted(state['owned_paths'])
+            trajectory.metadata['image_state'] = state
             result.trajectory = trajectory.to_dict()
             result.metrics.update(tool_metrics(result))
             result.metrics['latency_seconds'] = time.monotonic() - started

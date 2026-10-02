@@ -47,10 +47,14 @@ def test_configuration(settings):
         validate_config(settings, training=True)
 
 
-@pytest.mark.parametrize('before,after,expected', [(0, 1, 1), (0, 0, 0), (1, 1, .2), (1, 0, -1)])
-def test_outcome_rewards(settings, before, after, expected):
+@pytest.mark.parametrize('action,before,after,expected', [
+    ('revise', 0, 1, 1), ('revise', 0, 0, 0), ('revise', 1, 1, 0), ('revise', 1, 0, -1),
+    ('accept', 0, 0, -1), ('accept', 1, 1, .2),
+    ('uncertain', 0, 1, 1), ('uncertain', 1, 1, 0)])
+def test_outcome_rewards(settings, action, before, after, expected):
     spec = SessionSpec('v', 'p', 'verify', PROBLEM, [], 'g', 'a')
     output = result(spec, verdict())
+    output.verification = {'verdict': action}
     assert transition_reward(before, after, output, settings) == expected
     output.failure_kind = 'infrastructure'
     assert transition_reward(before, after, output, settings) is None
@@ -133,10 +137,112 @@ def test_tool_bonus_unique_successful_only(settings):
         output.trajectory['items'].extend([
             {'type': 'function_call', 'call_id': call_id, 'name': 'python_exec', 'arguments': arguments},
             {'type': 'function_call_output', 'call_id': call_id, 'output': {'success': success}}])
+    output.verification = {'verdict': 'revise'}
     assert transition_reward(0, 1, output, settings) == pytest.approx(1.03)
     assert transition_reward(0, 0, output, settings) == 0
     assert transition_reward(1, 0, output, settings) == -1
+    assert transition_reward(1, 1, output, settings) == 0
+    output.verification = {'verdict': 'accept'}
     assert transition_reward(1, 1, output, settings) == pytest.approx(.215)
+    assert transition_reward(0, 0, output, settings) == -1
+
+
+def test_accept_cannot_claim_repair_success(settings):
+    output = result(SessionSpec('v', 'p', 'verify', PROBLEM, [], 'g', 'a'), verdict())
+    output.verification = {'verdict': 'accept'}
+    with pytest.raises(ValueError, match='accept_cannot_change_outcome'):
+        transition_reward(0, 1, output, settings)
+
+
+def test_mean_repair_credit_masks_unknown_and_preserves_main_branch(settings):
+    from agent0_protocol.checkpointed import repair_transition_reward
+    output = result(SessionSpec('v', 'p', 'verify', PROBLEM, [], 'g', 'a'), verdict('revise', 'S1'))
+    output.verification = {'verdict': 'revise'}
+    group = [result(SessionSpec(str(i), 'p', 'repair', PROBLEM, [], 'g', 'a'),
+                    'FINAL_ANSWER: x', correct=i) for i in (0, 1)]
+    assert repair_transition_reward(0, group, output, settings, 0) == (0, [0, 1], .5)
+    settings['rewards']['repair_credit_mode'] = 'mean'
+    assert repair_transition_reward(0, group, output, settings, 0) == (.5, [0, 1], .5)
+    assert repair_transition_reward(1, group, output, settings, 0) == (-.5, [0, 1], .5)
+    group[1].correct = None
+    group[1].failure_kind = 'infrastructure'
+    assert repair_transition_reward(0, group, output, settings, 0) == (None, [0, None], None)
+
+
+def test_inherited_solver_tools_do_not_receive_verifier_bonus(settings):
+    inherited = PROBLEM + [
+        {'type': 'function_call', 'call_id': 's', 'name': 'python_exec', 'arguments': '{}'},
+        {'type': 'function_call_output', 'call_id': 's', 'output': {'success': True}}]
+    output = result(SessionSpec('v', 'p', 'verify', inherited, [], 'g', 'a'), verdict())
+    output.verification = {'verdict': 'accept'}
+    assert transition_reward(1, 1, output, settings) == .2
+
+
+def test_episode_mean_credit_never_selects_best_repair(settings):
+    settings['rewards']['repair_credit_mode'] = 'mean'
+    episode = Episode('p', PROBLEM, [], settings,
+        lambda r: int('FINAL_ANSWER: correct' in r.trajectory['items'][-1]['content']))
+    generator = episode.run()
+    specs = next(generator)
+    specs = generator.send([result(specs[0], 'FINAL_ANSWER: wrong')])
+    specs = generator.send([result(s, verdict('revise', 'S1')) for s in specs])
+    specs = generator.send([result(s, 'FINAL_ANSWER: ' + ('correct' if i % 2 else 'wrong'))
+                            for i, s in enumerate(specs)])
+    assert episode.attempts[-1]['correct'] == 0
+    assert episode.transitions[0]['reward'] == .5
+    assert episode.transitions[0]['after'] == 0
+    assert episode.transitions[0]['repair_success_rate'] == .5
+    with pytest.raises(StopIteration):
+        generator.send([result(s, verdict()) for s in specs])
+    assert episode.final['correct'] == 0
+    assert episode.transitions[-1]['reward'] == -1
+
+
+@pytest.mark.parametrize('flag', ['context_isolation', 'suffix_repair', 'train_verifier_rl'])
+def test_ablation_flags_are_real_booleans(settings, flag):
+    settings['ablation'][flag] = False
+    validate_config(settings, training=True)
+    settings['ablation'][flag] = 'false'
+    with pytest.raises(ValueError, match='invalid_ablation_flag'):
+        validate_config(settings, training=True)
+
+
+def test_ablation_full_restart_and_context_inheritance(settings):
+    from agent0_protocol.checkpointed import role_prompt
+    settings['ablation']['context_isolation'] = False
+    settings['ablation']['suffix_repair'] = False
+    validate_config(settings, training=True)
+    episode = Episode('p', PROBLEM, [], settings,
+        lambda r: int('FINAL_ANSWER: correct' in r.trajectory['items'][-1]['content']))
+    generator = episode.run()
+    specs = next(generator)
+    solver = result(specs[0], 'keep old S1')
+    solver.trajectory['items'].append(message('FINAL_ANSWER: wrong'))
+    solver.steps.append({'step_id': 'S2', 'item_start': 3, 'item_end': 4, 'state_before': {}})
+    solver.trajectory['metadata']['image_state'] = {'current_image_path': '/solver/current.png'}
+    specs = generator.send([solver])
+    assert specs[0].initial_items[1:4] == solver.trajectory['items'][1:]
+    assert specs[0].initial_image_path == '/solver/current.png'
+    feedback = json.loads(verdict('revise', 'S2'))
+    feedback['evidence'] = ['E00003']
+    specs = generator.send([result(s, json.dumps(feedback)) for s in specs])
+    for spec in specs:
+        assert spec.checkpoint is None and spec.first_step_number == 1
+        assert spec.initial_items[0]['content'] == role_prompt('repair', checkpointed=False)
+        assert len(spec.initial_items) == 3
+        assert 'verification_checkpoint' not in json.dumps(spec.initial_items)
+        assert 'keep old S1' not in json.dumps(spec.initial_items)
+        assert spec.initial_image_path is None
+    specs = generator.send([result(s, 'FINAL_ANSWER: correct') for s in specs])
+    assert 'keep old S1' not in json.dumps(specs[0].initial_items)
+    with pytest.raises(StopIteration):
+        generator.send([result(s, verdict()) for s in specs])
+    assert episode.accepted
+    from tools.data_builder.checkpointed_quality import audit_flow
+    assert audit_flow(episode.to_dict())
+    repair_rows = sft_rows(episode.to_dict())['repair']
+    assert repair_rows and all(row['metadata']['repair_strategy'] == 'full' for row in repair_rows)
+    assert all(row['metadata']['loss_start_item_index'] == 3 for row in repair_rows)
 
 
 def test_terminal_review_and_repair_exhaustion(settings):

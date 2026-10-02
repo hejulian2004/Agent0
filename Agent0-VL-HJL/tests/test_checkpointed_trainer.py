@@ -30,7 +30,8 @@ def test_original_problem_images_and_reference_separation():
         problem_inputs(trajectory, [])
 
 
-def test_all_rollouts_and_references_finish_before_role_updates(monkeypatch):
+@pytest.mark.parametrize('train_verifier', [True, False])
+def test_all_rollouts_and_references_finish_before_role_updates(monkeypatch, train_verifier):
     from tools.training import checkpointed_trainer as module
     events = []
     settings = load_config(Path(__file__).resolve().parents[1], 'local_4090_checkpointed')['checkpointed']
@@ -57,18 +58,27 @@ def test_all_rollouts_and_references_finish_before_role_updates(monkeypatch):
             return None
 
     monkeypatch.setattr(module, 'pack_records', lambda *args:
-        ({mode: Batch(mode) for mode in ('solve', 'repair', 'verify')}, []))
+        ({mode: Batch(mode) if mode != 'verify' or train_verifier else None
+          for mode in ('solve', 'repair', 'verify')}, []))
     trainer = SimpleNamespace(config=OmegaConf.create({'actor_rollout_ref': {'rollout': {
         'checkpointed': settings, 'temperature': 1.0}}, 'trainer': {'n_gpus_per_node': 4, 'nnodes': 1}}),
         actor_rollout_wg=Actor(), ref_policy_wg=Reference(), use_reference_policy=True,
         processor=None, tokenizer=SimpleNamespace(pad_token_id=0))
     metrics, _, _ = module.role_step(trainer, None)
-    assert events == ['rollout:all', 'ref:solve', 'union:solve', 'ref:repair', 'union:repair',
-                      'ref:verify', 'union:verify', 'update:solve', 'update:repair', 'update:verify']
+    expected = ['rollout:all', 'ref:solve', 'union:solve', 'ref:repair', 'union:repair']
+    if train_verifier:
+        expected += ['ref:verify', 'union:verify']
+    expected += ['update:solve', 'update:repair']
+    if train_verifier:
+        expected += ['update:verify']
+    assert events == expected
     assert metrics['before_accuracy_observed'] == 0
 
 
-def test_complete_native_episode_records_and_role_groups(monkeypatch, tmp_path):
+@pytest.mark.parametrize('isolation,suffix,train_verifier', [
+    (True, True, True), (False, False, False), (True, False, True)])
+def test_complete_native_episode_records_and_role_groups(monkeypatch, tmp_path,
+                                                       isolation, suffix, train_verifier):
     import json
     import torch
     from tensordict import TensorDict
@@ -128,6 +138,8 @@ def test_complete_native_episode_records_and_role_groups(monkeypatch, tmp_path):
     monkeypatch.setattr(torch.distributed, 'get_global_rank', lambda *args: 0)
     settings = load_config(Path(__file__).resolve().parents[1], 'local_4090_checkpointed')['checkpointed']
     settings['output_root'] = str(tmp_path)
+    settings['ablation'].update(context_isolation=isolation, suffix_repair=suffix,
+                               train_verifier_rl=train_verifier)
     tokenizer, engine = Tokenizer(), Engine()
     processor = SimpleNamespace(tokenizer=tokenizer, image_processor=SimpleNamespace(merge_size=2))
     rollout = SimpleNamespace(model_adapter=QwenModelAdapter(tokenizer), tokenizer=tokenizer,
@@ -147,7 +159,9 @@ def test_complete_native_episode_records_and_role_groups(monkeypatch, tmp_path):
     adapters.end_rollout()
     batches, flows = pack_records(records.non_tensor_batch['checkpointed_records'], settings, processor, 0, 4)
     assert len(flows) == 32 and all(flow['accepted'] for flow in flows)
-    assert len(batches['solve']) == 32 and len(batches['repair']) == 128 and len(batches['verify']) == 128
+    assert len(batches['solve']) == 32 and len(batches['repair']) == 128
+    assert 'verify' in engine.modes  # Frozen Verifier still performs every check.
+    assert (len(batches['verify']) == 128) if train_verifier else batches['verify'] is None
     assert all(flow['attempts'][0]['correct'] == 0 and flow['attempts'][-1]['correct'] == 1 for flow in flows)
     assert all(flow['transitions'][0]['reward'] == 1 for flow in flows)
-    assert all(batch.batch['multiturn_mask'].any() for batch in batches.values())
+    assert all(batch.batch['multiturn_mask'].any() for batch in batches.values() if batch is not None)

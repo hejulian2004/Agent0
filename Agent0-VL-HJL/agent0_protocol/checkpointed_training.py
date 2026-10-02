@@ -31,6 +31,8 @@ def sft_rows(flow):
                 mode=spec['mode'], problem_id=flow['problem_id'],
                 loss_start_item_index=len(spec['initial_items']),
                 checkpoint_id=(spec.get('checkpoint') or {}).get('checkpoint_id'))
+            if spec['mode'] == 'repair':
+                trajectory['metadata']['repair_strategy'] = 'suffix' if spec.get('checkpoint') else 'full'
             rows[spec['mode']].append(trajectory)
     return rows
 

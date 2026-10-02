@@ -13,6 +13,8 @@ from tools.training.canonical_rollout import object_array
 
 
 def pack_role(sessions, states, mode, settings, processor, pad_token_id, world_size=4):
+    if mode == 'verify' and not settings['ablation']['train_verifier_rl']:
+        return None
     from verl.models.transformers.qwen2_vl import get_rope_index
     sizes = {name: settings['sampling'][name + '_n'] for name in ('solve', 'repair', 'verify')}
     advantages = group_advantages(sessions, sizes)
