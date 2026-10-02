@@ -156,6 +156,8 @@ class Agent0RewardManager:
                 g_t = self._sigmoid(self.kappa * (self.tau_c - confidence))
                 c_repair = self.eta if was_repaired else 0.0
                 r_t = r_proc - g_t * c_repair
+                if getattr(self, 'local_loader', None) is not None and self.local_loader.current_phase == 'warmup':
+                    r_t = 0.0
                 effective_rewards.append(r_t)
 
                 # Place discounted reward at the step's final token
@@ -170,17 +172,29 @@ class Agent0RewardManager:
                     metrics_tensors['tool_success'][i, step_idx] = r_tool
 
             # ---- Outcome reward r_out (Eq. 5) ----
-            final_answer = assistant_text(semantic.items)
+            if 'final_solver_index' in semantic.metadata:
+                from tools.data_builder.sft_quality import solver_text
+                final_answer = solver_text(semantic)
+            else:
+                final_answer = assistant_text(semantic.items)
+            failed = bool(semantic.metadata.get('trajectory_failed', False))
             solution_str = "\\boxed{" + final_answer + "}" if final_answer else ""
 
+            if getattr(self, 'local_loader', None) is not None:
+                from tools.data_builder.sft_quality import StrictAnswerJudge
+                extracted = StrictAnswerJudge.extract_answer(final_answer)
+                solution_str = "\\boxed{" + extracted + "}" if extracted else final_answer
             score_fn = self.compute_score or get_policy_score
-            outcome_result = score_fn(solution_str=solution_str, ground_truth=ground_truth)
+            outcome_result = 0.0 if failed else score_fn(solution_str=solution_str, ground_truth=ground_truth)
             if isinstance(outcome_result, dict):
                 r_out = float(outcome_result.get('acc', outcome_result.get('score', 0.0)))
                 pred = outcome_result.get('pred', '')
             else:
                 r_out = float(outcome_result)
                 pred = ''
+            if failed:
+                reward_tensor[i].zero_()
+                effective_rewards = [0.0] * len(effective_rewards)
             metrics_tensors['outcome_acc'][i] = r_out
 
             final_pos = self._last_valid_position(data_item, seq_len)

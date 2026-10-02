@@ -455,27 +455,210 @@ qlora_smoke:
   max_train_records: 0
   resume_from: null
 
-# HJL (Hierarchical Judgment Loop) 配置 (当前聚焦通用 Agent0-VL，暂时停用 HJL 专属工具)
-hjl:
-  enabled: false
-  max_steps: 8
-  anomaly_threshold: 0.75
-  normal_threshold: 0.20
-  min_evidence_count: 1
-  checkpoint_confidence_threshold: 0.80
-  global_normal_confidence_threshold: 0.95
-  global_checkpoint: true
-  regional_checkpoint: true
-  evidence_checkpoint: true
-  failure_diagnosis: true
-  adaptive_stop: true
-  tool_failure_limit: 3
-  enabled_tools: []
-    # - crop_region
-    # - zoom_region
-    # - rotate_image
-    # - retrieve_normal_reference
-    # - compare_with_reference
-    # - localize_candidate
-  trajectory_output_dir: outputs/hjl_trajectories
+# Explicit server-local reproduction; generic workflows remain available.
+profiles:
+  local_4090:
+    runtime:
+      gpus: [0, 1, 2, 3]
+    assets:
+      source_root: /mnt/d/Agent0-dev-codex/Agent0-VL
+      base_model: /mnt/d/Agent0-dev-codex/Agent0-VL/checkpoints/base/Qwen2.5-VL-7B-Instruct
+      teacher_model: /mnt/d/qwen3.8-27B/model
+      validation: /mnt/d/Agent0-dev-codex/Agent0-VL/data/rl/validation_10_rebuilt.parquet
+    responses:
+      timeout_seconds: 300
+      max_output_tokens: 0
+    local_data:
+      sft_rows: 1000
+      rl_rows_per_phase: 200
+      seed: 20260926
+      rl_seed: 20260922
+      sft_root: data/sft/balanced
+      sft_output: data/sft/large/mixed_balanced_1000.jsonl
+      rl_warmup: data/rl/rl_warmup_200_multisource.parquet
+      rl_formal: data/rl/rl_200_multisource.parquet
+      validation: data/rl/validation_10_rebuilt.parquet
+      authorized_testmini: [mathverse, mathvista, wemath]
+    sft_data_generation:
+      concurrency: 8
+      min_steps: 3
+      local_teacher:
+        model: qwen3.8-27b
+        timeout_seconds: 300
+        speculative_decoding:
+          enabled: true
+          method: mtp
+          num_speculative_tokens: 1
+          speculative_model: null
+        serve:
+          tensor_parallel_size: 4
+          pipeline_parallel_size: 1
+          gpu_memory_utilization: 0.90
+          max_model_len: 57344
+          max_num_seqs: 8
+          max_num_batched_tokens: 16384
+          dtype: bfloat16
+          kv_cache_dtype: fp8
+    sft_local:
+      python: .venv-sft/bin/python
+      tp: 4
+      pp: 1
+      global_batch_size: 4
+      micro_batch_size: 4
+      epochs: 3
+      max_length: 30720
+      learning_rate: 1.0e-5
+      warmup_ratio: 0.05
+      lora_rank: 16
+      lora_alpha: 64
+      workers: 1
+      save_steps: 100
+      output_dir: checkpoints/sft_pipeline
+    rl_schedule:
+      phase: full
+      warmup_epochs: 2
+      formal_epochs: 1
+    rl:
+      hydra:
+        data:
+          train_files: data/rl/rl_warmup_200_multisource.parquet
+          val_files: data/rl/validation_10_rebuilt.parquet
+          train_batch_size: 4
+          max_prompt_length: 8192
+          max_response_length: 4096
+          filter_overlong_prompts: false
+          truncation: error
+        actor_rollout_ref:
+          model:
+            path: null
+            use_remove_padding: true
+          actor:
+            use_remove_padding: true
+            lora_rank: 16
+            lora_alpha: 64
+            target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+            use_qlora: false
+            ppo_mini_batch_size: 2
+            ppo_micro_batch_size_per_gpu: 1
+            use_dynamic_bsz: false
+            ulysses_sequence_parallel_size: 4
+            activation_cpu_offload: true
+            response_only_logits: true
+            entropy_chunk_size: 256
+            fsdp_config:
+              model_dtype: bf16
+              param_offload: true
+              optimizer_offload: true
+              backward_prefetch: backward_post
+          ref:
+            log_prob_micro_batch_size_per_gpu: 1
+            log_prob_use_dynamic_bsz: false
+            ulysses_sequence_parallel_size: 4
+            entropy_chunk_size: 256
+            use_torch_compile: false
+          rollout:
+            prompt_length: 8192
+            response_length: 4096
+            max_total_response_length: 30720
+            max_model_len: 40960
+            max_num_batched_tokens: 32768
+            max_num_seqs: 32
+            tensor_model_parallel_size: 4
+            pipeline_model_parallel_size: 1
+            gpu_memory_utilization: 0.96
+            dtype: bfloat16
+            temperature: 0.8
+            top_p: 0.95
+            enforce_eager: true
+            free_cache_engine: true
+            load_format: dummy_hf
+            sleep_level: 2
+            log_prob_micro_batch_size_per_gpu: 1
+            log_prob_use_dynamic_bsz: false
+            max_repairs_per_step: 6
+            streaming: true
+            local_protocol: true
+        trainer:
+          save_freq: 10
+          test_freq: 0
+          val_before_train: false
+          resume_mode: disable
+          workbench_enabled: true
+          logger: [console]
 
+  local_4090_checkpointed:
+    inherits: local_4090
+    local_data:
+      sft_root: data/sft/checkpointed_v1/candidates
+      sft_output: data/sft/checkpointed_v1/accepted_1000.jsonl
+      rl_warmup: data/rl/checkpointed_v1/warmup_200.parquet
+      rl_formal: data/rl/checkpointed_v1/formal_200.parquet
+      validation: data/rl/checkpointed_v1/validation_10.parquet
+    sft_data_generation:
+      min_steps: 1
+    checkpointed:
+      protocol_version: agent0.checkpointed.v1
+      adapter_strategy: separate
+      adapter_bundle: null
+      limits:
+        max_solver_segments: 8
+        max_repair_rounds: 2
+        max_verifier_tool_rounds: 4
+        request_timeout_seconds: 300
+        session_timeout_seconds: 1800
+        tool_timeout_seconds: 10
+        context_margin_tokens: 8
+        max_model_tokens: 40960
+        per_generation_tokens: 4096
+        solve_prompt_tokens: 8192
+        solve_response_tokens: 30720
+        repair_response_tokens: 30720
+        verify_response_tokens: 8192
+        teacher_reply_tokens: 0
+        sft_solve_tokens: 30720
+        sft_repair_tokens: 30720
+        sft_verify_tokens: 30720
+      sampling:
+        problems_per_step: 4
+        solve_n: 8
+        verify_n: 2
+        repair_n: 2
+        teacher_verify_n: 1
+        teacher_repair_n: 1
+        main_sample_index: 0
+        concurrency: 32
+        cpu_tool_workers: 8
+        ppo_minibatch_groups: 2
+        micro_batch_size: 1
+      rewards:
+        fix: 1.0
+        failed_fix: 0.0
+        preservation: 0.2
+        corruption: -1.0
+        beta_fix: 0.03
+        beta_keep: 0.015
+        tool_bonus_max_calls: 4
+        invalid_solve: 0.0
+        invalid_repair: 0.0
+        invalid_verify: -1.0
+        tool_bonus_enabled: true
+      adapters:
+        rank: 16
+        alpha: 64
+        max_loras: 3
+        max_cpu_loras: 3
+        target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+        modes: [solve, repair, verify]
+      statistics:
+        quantiles: [0.5, 0.9, 0.95, 0.99]
+        coverage_target: 0.99
+        token_margin_ratio: 0.10
+        token_alignment: 256
+      ablation:
+        context_isolation: true
+        suffix_repair: true
+        train_verifier_rl: true
+      output_root: outputs/checkpointed
+      audit_root: data/sft/checkpointed_v1/audit
+      sft_output_root: checkpoints/checkpointed_sft
+      rl_output_root: checkpoints/checkpointed_rl

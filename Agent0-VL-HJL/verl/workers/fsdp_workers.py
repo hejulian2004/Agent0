@@ -151,7 +151,11 @@ class ActorRolloutRefWorker(Worker):
                                role='actor'):
         from verl.utils.model import print_model_size, update_model_config, get_generation_config
         from verl.utils.torch_dtypes import PrecisionType
-        from transformers import AutoModelForCausalLM, AutoConfig, AutoModelForVision2Seq
+        from transformers import AutoModelForCausalLM, AutoConfig
+        try:
+            from transformers import AutoModelForVision2Seq
+        except ImportError:
+            from transformers import AutoModelForImageTextToText as AutoModelForVision2Seq
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy, MixedPrecision, CPUOffload
         from torch import optim
 
@@ -203,7 +207,10 @@ class ActorRolloutRefWorker(Worker):
                                                               attn_implementation='sdpa',
                                                               trust_remote_code=trust_remote_code)
 
-            if use_remove_padding or self.ulysses_sequence_parallel_size > 1:
+            if self.config.rollout.get('local_protocol', False):
+                from tools.training.ulysses_sdpa import install
+                install(actor_module, self.ulysses_sequence_parallel_size)
+            elif use_remove_padding or self.ulysses_sequence_parallel_size > 1:
                 from verl.models.transformers.monkey_patch import apply_monkey_patch
                 apply_monkey_patch(model=actor_module, ulysses_sp_size=self.ulysses_sequence_parallel_size)
 
@@ -214,6 +221,34 @@ class ActorRolloutRefWorker(Worker):
 
             # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
             actor_module.to(torch_dtype)
+
+            checkpointed = self.config.rollout.get('checkpointed', None)
+            if checkpointed:
+                from tools.training.role_adapters import RoleAdapters
+                policies = RoleAdapters.from_bundle(actor_module, local_path,
+                    checkpointed.adapter_bundle, float(self.config.actor.optim.lr))
+                policies.select_fsdp('solve', trainable=role == 'actor')
+                actor_module = policies.model
+                # PEFT may upcast loaded BF16 adapters to FP32. FSDP flat
+                # parameters require a uniform dtype, including references.
+                actor_module.to(torch_dtype)
+                if role == 'actor':
+                    self.role_policies = policies
+                else:
+                    self.role_reference = policies
+            elif role == 'actor' and self.config.rollout.get('local_protocol', False):
+                from peft import LoraConfig, TaskType, get_peft_model
+                actor_module.enable_input_require_grads()
+                actor_module = get_peft_model(actor_module, LoraConfig(
+                    task_type=TaskType.CAUSAL_LM,
+                    r=int(self.config.actor.lora_rank),
+                    lora_alpha=int(self.config.actor.lora_alpha),
+                    target_modules=list(self.config.actor.target_modules), bias='none'))
+                for name, parameter in actor_module.named_parameters():
+                    if 'visual' in name:
+                        parameter.requires_grad_(False)
+                if self.rank == 0:
+                    actor_module.print_trainable_parameters()
 
             if enable_gradient_checkpointing:
                 actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
@@ -252,11 +287,14 @@ class ActorRolloutRefWorker(Worker):
         # We force reference policy to use CPUOffload to save memory.
         # We force turn off CPUOffload for actor because it causes incorrect results when using grad accumulation
         cpu_offload = None if role == 'actor' else CPUOffload(offload_params=True)
+        from torch.distributed.fsdp import BackwardPrefetch
+        backward_prefetch = BackwardPrefetch.BACKWARD_POST if fsdp_config.get('backward_prefetch') == 'backward_post' else BackwardPrefetch.BACKWARD_PRE
         actor_module_fsdp = FSDP(
             actor_module,
             cpu_offload=cpu_offload,
+            backward_prefetch=backward_prefetch,
             param_init_fn=init_fn,
-            use_orig_params=False,
+            use_orig_params=bool(self.config.rollout.get('local_protocol', False)),
             auto_wrap_policy=auto_wrap_policy,
             device_id=torch.cuda.current_device(),
             sharding_strategy=sharding_strategy,  # zero3
@@ -274,6 +312,11 @@ class ActorRolloutRefWorker(Worker):
                                           lr=optim_config.lr,
                                           betas=optim_config.get('betas', (0.9, 0.999)),
                                           weight_decay=optim_config.get('weight_decay', 1e-2))
+            if self.config.rollout.get('checkpointed', None):
+                self.role_policies._setup_optimizers(optim_config.lr,
+                    betas=optim_config.get('betas', (0.9, 0.999)),
+                    weight_decay=optim_config.get('weight_decay', 1e-2))
+                actor_optimizer = self.role_policies.optimizers['solve']
 
             total_steps = optim_config.get('total_training_steps', 0)
             num_warmup_steps = int(optim_config.get('lr_warmup_steps', -1))
@@ -293,6 +336,14 @@ class ActorRolloutRefWorker(Worker):
                                                                      num_training_steps=total_steps)
             else:
                 raise NotImplementedError(f'Warmup style {warmup_style} is not supported')
+            if self.config.rollout.get('checkpointed', None):
+                self.role_schedulers = {'solve': actor_lr_scheduler}
+                for mode in ('repair', 'verify'):
+                    optimizer = self.role_policies.optimizers[mode]
+                    self.role_schedulers[mode] = (
+                        get_constant_schedule_with_warmup(optimizer, num_warmup_steps)
+                        if warmup_style == 'constant' else
+                        get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, total_steps))
         else:
             actor_optimizer = None
             actor_lr_scheduler = None
@@ -326,7 +377,7 @@ class ActorRolloutRefWorker(Worker):
                 rollout = vLLMMutliTurnRollout(model_path=local_path,
                                       config=self.config.rollout,
                                       tokenizer=self.tokenizer,
-                                      model_hf_config=self.actor_model_config,
+                                      model_hf_config=self.actor_model_config, processor=self.processor,
                                       device_mesh=rollout_device_mesh,
                                       trust_remote_code=trust_remote_code)
             elif self.config.rollout.rollout_type == 'evo':
@@ -334,7 +385,7 @@ class ActorRolloutRefWorker(Worker):
                 rollout = vLLMEvoTIRRollout(model_path=local_path,
                                       config=self.config.rollout,
                                       tokenizer=self.tokenizer,
-                                      model_hf_config=self.actor_model_config,
+                                      model_hf_config=self.actor_model_config, processor=self.processor,
                                       device_mesh=rollout_device_mesh,
                                       trust_remote_code=trust_remote_code)
             elif self.config.rollout.rollout_type == 'genrm':
@@ -342,7 +393,7 @@ class ActorRolloutRefWorker(Worker):
                 rollout = EvalGenrmRollout(model_path=local_path,
                                       config=self.config.rollout,
                                       tokenizer=self.tokenizer,
-                                      model_hf_config=self.actor_model_config,
+                                      model_hf_config=self.actor_model_config, processor=self.processor,
                                       device_mesh=rollout_device_mesh,
                                       trust_remote_code=trust_remote_code)
             elif self.config.rollout.rollout_type == 'agent0':
@@ -350,7 +401,7 @@ class ActorRolloutRefWorker(Worker):
                 rollout = vLLMAgent0Rollout(model_path=local_path,
                                       config=self.config.rollout,
                                       tokenizer=self.tokenizer,
-                                      model_hf_config=self.actor_model_config,
+                                      model_hf_config=self.actor_model_config, processor=self.processor,
                                       device_mesh=rollout_device_mesh,
                                       trust_remote_code=trust_remote_code)
             else:
@@ -362,7 +413,9 @@ class ActorRolloutRefWorker(Worker):
                                                                inference_engine=rollout.inference_engine,
                                                                model_config=self.actor_model_config,
                                                                full_params='hf' in self.config.rollout.load_format,
-                                                               device_mesh=rollout_device_mesh)
+                                                               device_mesh=rollout_device_mesh, local_profile=self.config.rollout.get('local_protocol', False),
+                                                               role_policies=getattr(self, 'role_policies', None),
+                                                               checkpointed=self.config.rollout.get('checkpointed', None))
             log_gpu_memory_usage('After building sharding manager', logger=None)
 
         elif rollout_name == 'sglang':
@@ -386,7 +439,7 @@ class ActorRolloutRefWorker(Worker):
                                                                  inference_engine=rollout.inference_engine,
                                                                  model_config=self.actor_model_config,
                                                                  full_params='hf' in self.config.rollout.load_format,
-                                                                 device_mesh=rollout_device_mesh)
+                                                                 device_mesh=rollout_device_mesh, local_profile=self.config.rollout.get('local_protocol', False))
             log_gpu_memory_usage('After building sharding manager', logger=None)
 
         return rollout, rollout_sharding_manager
@@ -394,6 +447,8 @@ class ActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
         from verl.workers.actor import DataParallelPPOActor
+        if self.config.rollout.get('local_protocol', False):
+            from tools.training.local_actor import DataParallelPPOActor
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get('external_lib', None))
 
@@ -432,7 +487,11 @@ class ActorRolloutRefWorker(Worker):
             OmegaConf.set_struct(self.config.actor, True)
             with open_dict(self.config.actor):
                 self.config.actor.use_remove_padding = use_remove_padding
-            self.actor = DataParallelPPOActor(config=self.config.actor,
+            if self.config.rollout.get('local_protocol', False):
+                from tools.training.local_actor import DataParallelPPOActor as ActorClass
+            else:
+                ActorClass = DataParallelPPOActor
+            self.actor = ActorClass(config=self.config.actor,
                                               actor_module=self.actor_module_fsdp,
                                               actor_optimizer=self.actor_optimizer)
 
@@ -453,7 +512,11 @@ class ActorRolloutRefWorker(Worker):
             OmegaConf.set_struct(self.config.ref, True)
             with open_dict(self.config.ref):
                 self.config.ref.use_remove_padding = use_remove_padding
-            self.ref_policy = DataParallelPPOActor(config=self.config.ref, actor_module=self.ref_module_fsdp)
+            if self.config.rollout.get('local_protocol', False):
+                from tools.training.local_actor import DataParallelPPOActor as RefClass
+            else:
+                RefClass = DataParallelPPOActor
+            self.ref_policy = RefClass(config=self.config.ref, actor_module=self.ref_module_fsdp)
 
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
@@ -470,6 +533,19 @@ class ActorRolloutRefWorker(Worker):
         data = data.to(torch.cuda.current_device())
 
         assert self._is_actor
+        if self.config.rollout.get('checkpointed', None):
+            mode = data.meta_info['role_mode']
+            if self.role_policies.rollout_versions is not None:
+                raise RuntimeError('Cannot update a policy during rollout')
+            self.role_policies.select_fsdp(mode)
+            self.actor_optimizer = self.role_policies.optimizers[mode]
+            self.actor.actor_optimizer = self.actor_optimizer
+            self.actor_lr_scheduler = self.role_schedulers[mode]
+            dp = self.device_mesh.size() // self.ulysses_sequence_parallel_size
+            mini = int(data.meta_info['ppo_mini_batch_size'])
+            if mini % dp:
+                raise ValueError('Role PPO minibatch must divide data parallel size')
+            self.config.actor.ppo_mini_batch_size = mini // dp
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         if self._is_offload_optimizer:
@@ -492,6 +568,8 @@ class ActorRolloutRefWorker(Worker):
             metrics['perf/cpu_memory_used_gb'] = psutil.virtual_memory().used / (1024**3)
 
             self.actor_lr_scheduler.step()
+            if self.config.rollout.get('checkpointed', None):
+                self.role_policies.versions[mode] += 1
             lr = self.actor_lr_scheduler.get_last_lr()[0]
             metrics['actor/lr'] = lr
 
@@ -509,6 +587,24 @@ class ActorRolloutRefWorker(Worker):
             offload_fsdp_optimizer(optimizer=self.actor_optimizer)
 
         return output
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def generate_checkpointed_records(self, prompts: DataProto):
+        if not self.config.rollout.get('checkpointed', None):
+            raise ValueError('Checkpointed generation requires the new protocol')
+        from omegaconf import OmegaConf
+        from verl.third_party.vllm import parallel_state
+        from tools.training.checkpointed_records import generate_records
+        prompts = prompts.to(torch.cuda.current_device())
+        tp = parallel_state.get_tp_group()
+        with self.rollout_sharding_manager:
+            adapters = self.rollout_sharding_manager.native_role_lora
+            prompts = self.rollout_sharding_manager.preprocess_data(prompts)
+            settings = OmegaConf.to_container(self.config.rollout.checkpointed, resolve=True)
+            output = generate_records(self.rollout, prompts, settings, adapters,
+                                      tp.cpu_group, tp.rank_in_group)
+            output = self.rollout_sharding_manager.postprocess_data(output)
+        return output.to('cpu')
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def generate_sequences(self, prompts: DataProto):
@@ -553,6 +649,8 @@ class ActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_prob(self, data: DataProto):
         assert self._is_actor
+        if self.config.rollout.get('checkpointed', None):
+            self.role_policies.select_fsdp(data.meta_info['role_mode'])
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
@@ -587,6 +685,8 @@ class ActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_ref_log_prob(self, data: DataProto):
         assert self._is_ref
+        if self.config.rollout.get('checkpointed', None):
+            self.role_reference.select_fsdp(data.meta_info['role_mode'], trainable=False)
 
         # Support all hardwares
         data = data.to(torch.cuda.current_device())
@@ -623,6 +723,10 @@ class ActorRolloutRefWorker(Worker):
                                                 hdfs_path=hdfs_path,
                                                 global_step=global_step,
                                                 max_ckpt_to_keep=max_ckpt_to_keep)
+        if self.config.rollout.get('checkpointed', None):
+            from tools.training.role_fsdp_checkpoint import save
+            save(local_path, self.actor_module_fsdp, self.role_policies,
+                 self.role_schedulers, self.config.rollout.checkpointed.training_fingerprint)
 
         torch.distributed.barrier()
         if self._is_offload_param:
@@ -630,12 +734,21 @@ class ActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
+        if self.config.rollout.get('checkpointed', None):
+            if del_local_after_load:
+                raise ValueError('Role checkpoint loading must preserve optimizer sidecars')
+            from tools.training.role_fsdp_checkpoint import validate
+            validate(local_path, self.config.rollout.checkpointed.training_fingerprint)
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
         self.checkpoint_manager.load_checkpoint(local_path=local_path,
                                                 hdfs_path=hdfs_path,
                                                 del_local_after_load=del_local_after_load)
+        if self.config.rollout.get('checkpointed', None):
+            from tools.training.role_fsdp_checkpoint import load
+            load(local_path, self.actor_module_fsdp, self.role_policies,
+                 self.role_schedulers, self.config.rollout.checkpointed.training_fingerprint)
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)

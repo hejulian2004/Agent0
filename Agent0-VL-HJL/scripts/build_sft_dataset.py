@@ -13,18 +13,14 @@ import copy
 import hashlib
 import json
 import logging
-import math
 import os
 import random
 import re
 import sys
-import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlparse
@@ -48,9 +44,8 @@ from agent0_protocol.tools import (
     _to_relative_path,
     _resolve_relative_path,
 )
-from agent0_protocol.verifier import verify_trajectory
-from tools.data_builder.backends.base import image_data_url
-from verl.prompts.agent0_templates import assistant_text, render_solver_request, render_system_prompt
+from agent0_protocol.local_prompts import render_system_prompt
+from tools.data_builder.sources import SOURCE_STAGES
 
 logger = logging.getLogger(__name__)
 
@@ -59,152 +54,9 @@ logger = logging.getLogger(__name__)
 # 1. Answer Extraction and Equivalence Judging
 # ==============================================================================
 
-class AnswerJudge:
-    """Multi-tier answer extraction, normalization, and equivalence verification."""
-
-    @staticmethod
-    def extract_answer(text: str | None) -> str | None:
-        """Extract candidate answer from XML tags, LaTeX boxed, or common phrasing."""
-        if not text:
-            return None
-        raw = str(text).strip()
-
-        # 1. <answer>...</answer> tags
-        m = re.search(r"<answer>(.*?)</answer>", raw, re.DOTALL | re.IGNORECASE)
-        if m:
-            return m.group(1).strip()
-
-        # 2. \boxed{...} LaTeX markup
-        m = re.search(r"\\boxed\{((?:[^{}]|\{[^{}]*\})*)\}", raw)
-        if m:
-            return m.group(1).strip()
-
-        # 3. Explicit "The answer is ..." or "Final Answer:" prefixes
-        for line in reversed(raw.splitlines()):
-            line_str = line.strip()
-            prefix_match = re.search(r"(?:final answer|the answer is|conclusion|answer)\s*[:：]\s*(.+)", line_str, re.IGNORECASE)
-            if prefix_match:
-                cand = prefix_match.group(1).strip().rstrip(".")
-                if cand:
-                    return cand
-
-        # Fallback to the last nonempty line
-        lines = [line.strip() for line in raw.splitlines() if line.strip()]
-        return lines[-1].rstrip(".") if lines else None
-
-    @staticmethod
-    def normalize_text(text: str | None) -> str:
-        """Normalize answer text by removing formatting and punctuation."""
-        if not text:
-            return ""
-        s = str(text).strip().lower()
-        # Strip LaTeX text macros
-        s = re.sub(r"\\[a-zA-Z]+\{([^}]+)\}", r"\1", s)
-        s = re.sub(r"[$]", "", s)
-        s = re.sub(r"\s+", " ", s).strip()
-        s = s.rstrip(".,;:!?'\"")
-        return s
-
-    @staticmethod
-    def extract_options(question: str) -> dict[str, str]:
-        """Extract multiple choice options from a question string (e.g. '(A) 12 (B) 24')."""
-        options: dict[str, str] = {}
-        # Pattern 1: (A) value (B) value
-        matches = re.findall(r"\(([A-Za-z])\)\s*([^(\n]+)", str(question))
-        for k, v in matches:
-            options[k.upper()] = v.strip().rstrip(".,;")
-        if options:
-            return options
-        # Pattern 2: A. value B. value or A) value
-        matches2 = re.findall(r"(?:^|\s)([A-Za-z])[\.:\)]\s*([^\n\(\)]+)", str(question))
-        for k, v in matches2:
-            options[k.upper()] = v.strip().rstrip(".,;")
-        return options
-
-    @classmethod
-    def parse_number(cls, text: str) -> float | None:
-        """Parse numerical representation including decimals, percentages, and fractions."""
-        s = cls.normalize_text(text)
-        if not s:
-            return None
-
-        # Percentage
-        if s.endswith("%"):
-            try:
-                return float(s[:-1].strip()) / 100.0
-            except ValueError:
-                pass
-
-        # Fraction "a/b"
-        if "/" in s:
-            parts = s.split("/")
-            if len(parts) == 2:
-                try:
-                    num = float(parts[0].strip())
-                    denom = float(parts[1].strip())
-                    if denom != 0:
-                        return num / denom
-                except ValueError:
-                    pass
-
-        # Scientific notation or plain float
-        num_m = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", s)
-        if num_m:
-            try:
-                return float(num_m.group(0))
-            except ValueError:
-                pass
-
-        return None
-
-    @classmethod
-    def is_equivalent(
-        cls,
-        candidate: str | None,
-        reference: str | None,
-        question: str = "",
-        options: dict[str, str] | None = None,
-        tolerance: float = 1e-4,
-    ) -> bool:
-        """Determine whether candidate answer agrees with reference answer."""
-        cand_raw = cls.extract_answer(candidate) or candidate or ""
-        ref_raw = cls.extract_answer(reference) or reference or ""
-
-        cand_norm = cls.normalize_text(cand_raw)
-        ref_norm = cls.normalize_text(ref_raw)
-
-        if not cand_norm or not ref_norm:
-            return False
-
-        # 1. Exact normalized match
-        if cand_norm == ref_norm:
-            return True
-
-        # 2. Numerical equivalence check
-        c_num = cls.parse_number(cand_norm)
-        r_num = cls.parse_number(ref_norm)
-        if c_num is not None and r_num is not None:
-            if math.isclose(c_num, r_num, rel_tol=tolerance, abs_tol=tolerance):
-                return True
-
-        # 3. Multiple choice option matching
-        opts = options or cls.extract_options(question)
-        if opts:
-            # Candidate is option letter (e.g. "B") while reference is option value, or vice-versa
-            cand_key = cand_norm.upper()
-            ref_key = ref_norm.upper()
-            if cand_key in opts and cls.normalize_text(opts[cand_key]) == ref_norm:
-                return True
-            if ref_key in opts and cls.normalize_text(opts[ref_key]) == cand_norm:
-                return True
-            if cand_key in opts and ref_key in opts and cand_key == ref_key:
-                return True
-
-        # 4. Substring inclusion if candidate strictly matches reference word boundary
-        if len(ref_norm) > 2 and re.search(r"\b" + re.escape(ref_norm) + r"\b", cand_norm):
-            return True
-
-        return False
+from tools.data_builder.sft_quality import (
+    StrictAnswerJudge as AnswerJudge, solver_text, verify_sft_semantics,
+)
 
 
 # ==============================================================================
@@ -341,15 +193,7 @@ class FormatCleaner:
 
         # 5. Answer correctness check against ground truth if provided
         if ground_truth:
-            final_text = ""
-            for item in reversed(trajectory.items):
-                if item.get("type") == "message" and item.get("role") == "assistant":
-                    content = item.get("content", "")
-                    if isinstance(content, str):
-                        final_text = content
-                    elif isinstance(content, list):
-                        final_text = "".join(str(p.get("text", "")) for p in content if isinstance(p, dict))
-                    break
+            final_text = solver_text(trajectory)
 
             question_text = ""
             if len(trajectory.items) > 1 and trajectory.items[1].get("type") == "message":
@@ -388,9 +232,16 @@ class SFTTrajectoryBuilder:
     def __init__(self, registry: ToolRegistry | None = None) -> None:
         self.registry = registry or get_tool_registry()
         self.canonical_tools = self.registry.definitions()
+        self.answer_judge_hashes = set()
 
     def normalize_trajectory(self, trajectory: CanonicalTrajectory) -> CanonicalTrajectory:
         """Ensure tool snapshot strictly matches current registry definitions and clean text."""
+        if "serc" in trajectory.metadata:
+            # Generated role evidence must retain the exact observed bytes.
+            trajectory.validate()
+            return trajectory
+        if trajectory.items and trajectory.items[0].get("role") == "system" and trajectory.items[0].get("content") != render_system_prompt():
+            raise ProtocolError("conflicting_system_prompt")
         trajectory.tools = copy.deepcopy(self.canonical_tools)
         if not trajectory.items or trajectory.items[0].get("type") != "message" or trajectory.items[0].get("role") != "system":
             trajectory.items.insert(0, {
@@ -418,13 +269,16 @@ class SFTTrajectoryBuilder:
                     data = json.loads(raw)
                     traj_data = data.get("trajectory", data)
                     if isinstance(traj_data, dict) and "items" in traj_data:
-                        traj_data["tools"] = copy.deepcopy(self.canonical_tools)
+                        if "serc" not in traj_data.get("metadata", {}):
+                            traj_data["tools"] = copy.deepcopy(self.canonical_tools)
                         if "trajectory_id" not in traj_data:
                             traj_data["trajectory_id"] = f"traj_jsonl_{line_no}_{uuid.uuid4().hex[:6]}"
                         traj = CanonicalTrajectory.from_dict(traj_data)
                         trajectories.append(self.normalize_trajectory(traj))
+                except (json.JSONDecodeError, TypeError) as exc:
+                    raise ProtocolError(f"Invalid input at {jsonl_path}:{line_no}") from exc
                 except Exception as exc:
-                    logger.debug(f"Skipping line {line_no} in {jsonl_path}: {exc}")
+                    logger.warning("Rejected input row %s:%s: %s", jsonl_path, line_no, type(exc).__name__)
 
         return trajectories
 
@@ -439,7 +293,8 @@ class SFTTrajectoryBuilder:
             try:
                 data = json.loads(p.read_text(encoding="utf-8"))
                 if isinstance(data, dict) and "items" in data:
-                    data["tools"] = copy.deepcopy(self.canonical_tools)
+                    if "serc" not in data.get("metadata", {}):
+                        data["tools"] = copy.deepcopy(self.canonical_tools)
                     traj = CanonicalTrajectory.from_dict(data)
                     trajectories.append(self.normalize_trajectory(traj))
             except Exception as exc:
@@ -712,6 +567,7 @@ class SFTTrajectoryBuilder:
         valid: list[CanonicalTrajectory] = []
         stats: dict[str, int] = {}
         seen_hashes: set[str] = set()
+        seen_samples: set[str] = set()
 
         for traj in trajectories:
             gt = (ground_truth_map or {}).get(traj.trajectory_id)
@@ -729,15 +585,21 @@ class SFTTrajectoryBuilder:
             if h in seen_hashes:
                 stats["duplicate_trajectory"] = stats.get("duplicate_trajectory", 0) + 1
                 continue
-            seen_hashes.add(h)
+            sample_hash = traj.metadata.get("sample_hash")
+            if sample_hash and sample_hash in seen_samples:
+                stats["duplicate_sample"] = stats.get("duplicate_sample", 0) + 1
+                continue
 
             # Semantic verification check
-            if verify_semantics:
-                v = verify_trajectory(traj, self.registry)
+            if verify_semantics or "serc" in traj.metadata:
+                v = verify_sft_semantics(traj, self.registry, self.answer_judge_hashes)
                 if not v.valid:
                     stats["semantic_verifier_failed"] = stats.get("semantic_verifier_failed", 0) + 1
                     continue
 
+            seen_hashes.add(h)
+            if sample_hash:
+                seen_samples.add(sample_hash)
             valid.append(traj)
 
         return valid, stats
@@ -760,6 +622,10 @@ class SFTTrajectoryBuilder:
 
         records: list[dict[str, Any]] = []
         for traj in shuffled:
+            if "serc" in traj.metadata:
+                result = verify_sft_semantics(traj, self.registry, self.answer_judge_hashes)
+                if not result.valid:
+                    raise ProtocolError("Export audit failed: " + "; ".join(result.issues))
             num_calls = sum(1 for item in traj.items if item.get("type") == "function_call")
             tool_names = [item["name"] for item in traj.items if item.get("type") == "function_call"]
             records.append({
@@ -819,6 +685,8 @@ class SFTTrajectoryBuilder:
         all_tools = [tool for rec in records for tool in rec.get("tools_used", [])]
         manifest = {
             "schema_version": SCHEMA_VERSION,
+            "prompt_sha256": hashlib.sha256(render_system_prompt().encode()).hexdigest(),
+            "answer_judge_accepted_hashes": sorted(self.answer_judge_hashes),
             "total_records": len(records),
             "train_records": len(train_records),
             "val_records": len(val_records),
@@ -848,6 +716,7 @@ class BuildStats:
     successful_tool_calls: int = 0
     answer_judge_calls: int = 0
     answer_judge_passes: int = 0
+    answer_judge_errors: int = 0
     rejected: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -858,6 +727,7 @@ class BuildStats:
             "successful_tool_calls": self.successful_tool_calls,
             "answer_judge_calls": self.answer_judge_calls,
             "answer_judge_passes": self.answer_judge_passes,
+            "answer_judge_errors": self.answer_judge_errors,
             "tool_success_rate": round(self.successful_tool_calls / max(1, self.tool_calls), 4),
             "export_rate": round(self.exported / max(1, self.attempted), 4),
             "rejected_breakdown": dict(self.rejected),
@@ -876,171 +746,9 @@ def run_task_rollouts_concurrent(
     min_steps: int = 3,
 ) -> tuple[list[CanonicalTrajectory], BuildStats]:
     """Execute multi-turn tool rollouts with strict concurrency control against local or remote model."""
-    output_jsonl.parent.mkdir(parents=True, exist_ok=True)
-    state_file = Path(str(output_jsonl) + ".state.json")
-
-    seen_ids: set[str] = set()
-    seen_hashes: set[str] = set()
-    completed_trajectories: list[CanonicalTrajectory] = []
-
-    # Resume from existing progress
-    if resume and output_jsonl.is_file():
-        logger.info(f"Resuming from existing output file: {output_jsonl}")
-        with output_jsonl.open("r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip():
-                    try:
-                        record = json.loads(line)
-                        traj_dict = record.get("trajectory", record)
-                        t = CanonicalTrajectory.from_dict(traj_dict)
-                        seen_ids.add(t.trajectory_id)
-                        if "sample_id" in t.metadata:
-                            seen_ids.add(str(t.metadata["sample_id"]))
-                        if "sample_id" in record:
-                            seen_ids.add(str(record["sample_id"]))
-                        seen_hashes.add(FormatCleaner.compute_trajectory_hash(t))
-                        completed_trajectories.append(t)
-                    except Exception:
-                        pass
-        logger.info(f"Loaded {len(completed_trajectories)} already completed trajectories.")
-
-    stats = BuildStats()
-    semaphore = threading.Semaphore(max(1, concurrency))
-    file_lock = threading.Lock()
-    stats_lock = threading.Lock()
-
-    def process_task(task: dict[str, Any]) -> CanonicalTrajectory | None:
-        sample_id = str(task.get("id", task.get("sample_id", uuid.uuid4().hex[:8])))
-        task_id = str(task.get("id", ""))
-        if sample_id in seen_ids or (task_id and task_id in seen_ids):
-            return None
-
-        question = str(task.get("question", task.get("prompt", "")))
-        if not question.strip():
-            return None
-
-        ground_truth = task.get("ground_truth", task.get("answer"))
-        image = task.get("image") or task.get("image_path") or task.get("image_pil")
-
-        with stats_lock:
-            stats.attempted += 1
-
-        # Format initial prompt items
-        content: str | list[dict[str, Any]] = render_solver_request(question)
-        if image is not None:
-            try:
-                content = [
-                    {"type": "input_text", "text": render_solver_request(question)},
-                    {"type": "input_image", "image_url": image_data_url(image)},
-                ]
-            except Exception as e:
-                with stats_lock:
-                    stats.rejected[f"image_load_error: {type(e).__name__}"] = stats.rejected.get(f"image_load_error: {type(e).__name__}", 0) + 1
-                return None
-
-        initial_items = [
-            {"type": "message", "role": "system", "content": render_system_prompt()},
-            {"type": "message", "role": "user", "content": content},
-        ]
-
-        # Bounded concurrency execution through local/remote model
-        with semaphore:
-            try:
-                traj = runtime.run(
-                    initial_items,
-                    trajectory_id=f"sft_task_{sample_id}_{uuid.uuid4().hex[:6]}",
-                    metadata={"sample_id": sample_id, "source": task.get("data_source", "task_rollout")},
-                )
-            except Exception as e:
-                with stats_lock:
-                    stats.rejected[f"runtime_error: {type(e).__name__}"] = stats.rejected.get(f"runtime_error: {type(e).__name__}", 0) + 1
-                return None
-
-        # Track tool calls
-        calls = [item for item in traj.items if item.get("type") == "function_call"]
-        outputs = [item for item in traj.items if item.get("type") == "function_call_output"]
-        with stats_lock:
-            stats.tool_calls += len(calls)
-            stats.successful_tool_calls += sum(bool(o.get("output", {}).get("success")) for o in outputs)
-
-        # Answer judging if ground truth exists
-        if ground_truth:
-            pred_text = assistant_text(traj.items) or ""
-            with stats_lock:
-                stats.answer_judge_calls += 1
-            is_correct = AnswerJudge.is_equivalent(pred_text, str(ground_truth), question=question)
-            if not is_correct:
-                with stats_lock:
-                    stats.rejected["answer_mismatch"] = stats.rejected.get("answer_mismatch", 0) + 1
-                return None
-            with stats_lock:
-                stats.answer_judge_passes += 1
-
-        # Audit and cleaning
-        builder.normalize_trajectory(traj)
-        ok, reason = FormatCleaner.audit_trajectory(traj, min_steps=min_steps)
-        if not ok:
-            with stats_lock:
-                stats.rejected[reason] = stats.rejected.get(reason, 0) + 1
-            return None
-
-        # Deduplication
-        h = FormatCleaner.compute_trajectory_hash(traj)
-        with stats_lock:
-            if h in seen_hashes:
-                stats.rejected["duplicate"] = stats.rejected.get("duplicate", 0) + 1
-                return None
-            seen_hashes.add(h)
-            seen_ids.add(sample_id)
-
-        # Semantic verifier
-        if verify_semantics:
-            v = verify_trajectory(traj, builder.registry)
-            if not v.valid:
-                with stats_lock:
-                    stats.rejected["semantic_verify_failed"] = stats.rejected.get("semantic_verify_failed", 0) + 1
-                return None
-
-        # Write incrementally under file lock
-        rec = {
-            "trajectory_id": traj.trajectory_id,
-            "data_source": task.get("data_source", "task_rollout"),
-            "trajectory": traj.to_dict(),
-            "num_items": len(traj.items),
-            "num_tool_calls": len(calls),
-            "tools_used": list(set(c["name"] for c in calls)),
-        }
-        with file_lock:
-            with output_jsonl.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                f.flush()
-                os.fsync(f.fileno())
-
-            # Atomic state file write
-            state_tmp = state_file.with_suffix(".tmp")
-            with state_tmp.open("w", encoding="utf-8") as sf:
-                sf.write(json.dumps(stats.to_dict(), indent=2, ensure_ascii=False) + "\n")
-                sf.flush()
-                os.fsync(sf.fileno())
-            state_tmp.replace(state_file)
-
-        with stats_lock:
-            stats.exported += 1
-
-        return traj
-
-    logger.info(f"Starting concurrent task rollout over {len(tasks)} tasks (concurrency={concurrency})...")
-    with ThreadPoolExecutor(max_workers=concurrency) as executor:
-        futures = [executor.submit(process_task, task) for task in tasks]
-        for f in as_completed(futures):
-            try:
-                res = f.result()
-                if res is not None:
-                    completed_trajectories.append(res)
-            except Exception as exc:
-                logger.warning(f"Task worker failed with exception: {exc}")
-
-    return completed_trajectories, stats
+    from tools.data_builder.sft_stream import run_stream
+    return run_stream(tasks, runtime, builder, output_jsonl, concurrency=concurrency,
+                      resume=resume, verify_semantics=verify_semantics, min_steps=min_steps)
 
 
 class DummyTokenizer:
@@ -1057,21 +765,47 @@ class DummyTokenizer:
 
 
 def verify_sft_dataset_compatibility(dataset_path: Path) -> dict[str, Any]:
-    """Verify that Agent0SFTDataset loads the generated dataset without error."""
+    """Validate every canonical row; tensor checks require a real VL processor."""
+    from agent0_protocol.adapters import QwenModelAdapter
     from verl.utils.dataset.agent0_sft_dataset import Agent0SFTDataset
 
-    ds = Agent0SFTDataset(str(dataset_path), DummyTokenizer(), max_length=8192)
-    sample = ds[0]
-    loss_mask_sum = int(sample["loss_mask"].sum().item())
-    input_ids_len = int(sample["input_ids"].shape[0])
-
-    return {
-        "status": "passed",
-        "dataset_len": len(ds),
-        "input_ids_len": input_ids_len,
-        "loss_mask_trainable_tokens": loss_mask_sum,
-        "sample_trajectory_id": sample.get("trajectory_id"),
-    }
+    frame = pd.read_parquet(dataset_path) if dataset_path.suffix == ".parquet" else pd.read_json(dataset_path, lines=True)
+    if frame.empty or "trajectory" not in frame:
+        raise ProtocolError("SFT export is empty or missing trajectory column")
+    image_rows = 0
+    registry = get_tool_registry()
+    adapter = QwenModelAdapter(DummyTokenizer())
+    max_text_length = 1
+    for value in frame["trajectory"]:
+        trajectory = CanonicalTrajectory.from_dict(json.loads(value) if isinstance(value, str) else value)
+        if trajectory.tools != registry.definitions():
+            raise ProtocolError("SFT tool registry mismatch")
+        if trajectory.items[0].get("content") != render_system_prompt():
+            raise ProtocolError("SFT system prompt mismatch")
+        ok, reason = FormatCleaner.audit_trajectory(trajectory)
+        if not ok:
+            raise ProtocolError(reason)
+        has_images = any(
+            (item.get("type") == "message" and isinstance(item.get("content"), list)
+             and any(part.get("type") == "input_image" for part in item["content"] if isinstance(part, dict)))
+            or (item.get("type") == "function_call_output" and
+                (item.get("output", {}).get("image_url") or item.get("output", {}).get("image_urls") or item.get("output", {}).get("images")))
+            for item in trajectory.items)
+        if has_images:
+            image_rows += 1
+        else:
+            max_text_length = max(max_text_length, sum(len(adapter.render([item], trajectory.tools, generate=False).encode()) for item in trajectory.items))
+    if image_rows:
+        return {"status": "schema_passed", "dataset_len": len(frame), "image_rows": image_rows,
+                "tensor_check": "requires_real_vl_processor"}
+    # Dummy byte tokens verify the local container/mask path without truncation;
+    # this is not a real model's context-length or GPU feasibility check.
+    ds = Agent0SFTDataset(str(dataset_path), DummyTokenizer(), max_length=max_text_length, truncation="error")
+    for index in range(len(ds)):
+        if int(ds[index]["loss_mask"].sum().item()) <= 0:
+            raise ProtocolError("SFT row has no trainable tokens")
+    return {"status": "passed", "dataset_len": len(ds), "input_ids_len": max_text_length,
+            "loss_mask_trainable_tokens": int(ds[0]["loss_mask"].sum().item())}
 
 
 def main() -> int:
@@ -1082,11 +816,22 @@ def main() -> int:
         default=None,
         help="Input JSONL file or directory of canonical JSON trajectories.",
     )
+    parser.add_argument("--judge-state", type=Path, nargs="*", default=[], help="Committed source states authorizing imported LLM-accepted trajectories.")
+    parser.add_argument("--source", choices=sorted(SOURCE_STAGES))
+    parser.add_argument("--source-path", type=Path)
+    parser.add_argument("--source-split", default="train", choices=["train", "val", "test", "all"])
+    parser.add_argument("--teacher-temperature", type=float, default=0.0)
+    parser.add_argument("--teacher-top-p", type=float, default=1.0)
+    parser.add_argument("--teacher-retries", type=int, default=3)
+    parser.add_argument("--max-reasoning-steps", type=int, default=8)
+    parser.add_argument("--sandbox-timeout", type=float, default=float(os.environ.get("SANDBOX_RUN_TIMEOUT", "10")))
+    parser.add_argument("--teacher-max-output-tokens", type=int, default=0,
+                        help="Optional per-request limit; 0 omits the API output limit.")
     parser.add_argument(
         "--tasks",
         type=str,
         default=None,
-        help="Input tasks JSONL file (question, optional image, optional ground_truth) to drive model rollouts.",
+        help="Tasks JSONL with question, required reference, and optional image/images; runs audited SERC rollouts.",
     )
     parser.add_argument(
         "--output-dir", "-o",
@@ -1175,7 +920,7 @@ def main() -> int:
     parser.add_argument(
         "--no-verify",
         action="store_true",
-        help="Skip semantic verifier check during filtering.",
+        help="Skip static checks for legacy input only; generated SERC evidence is always audited.",
     )
     parser.add_argument(
         "--data-source",
@@ -1194,28 +939,37 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
     builder = SFTTrajectoryBuilder()
+    for state_path in args.judge_state:
+        state = json.loads(state_path.read_text())
+        if not state.get("fingerprint"):
+            parser.error("Judge state has no generation fingerprint")
+        builder.answer_judge_hashes.update(state.get("answer_judge_accepted_hashes", []))
     raw_trajectories: list[CanonicalTrajectory] = []
     out_dir = args.output_dir if args.output_dir.is_absolute() else ROOT / args.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. If --tasks is provided: run concurrent rollouts via ResponsesRuntime against local model (e.g. Qwen 27B)
-    if args.tasks:
-        tasks_path = Path(args.tasks)
-        if not tasks_path.is_absolute():
-            tasks_path = ROOT / tasks_path
-        if not tasks_path.is_file():
-            logging.error(f"Tasks file not found: {tasks_path}")
-            return 1
-
-        tasks: list[dict[str, Any]] = []
-        with tasks_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip():
-                    try:
-                        tasks.append(json.loads(line))
-                    except Exception:
-                        pass
-        logging.info(f"Loaded {len(tasks)} tasks from {tasks_path}")
+    if args.tasks or args.source:
+        if args.tasks and args.source:
+            parser.error("Use --tasks or --source, not both")
+        if args.source:
+            if not args.source_path:
+                parser.error("--source requires --source-path")
+            from tools.data_builder.sources import load_source
+            tasks = load_source(args.source, args.source_path, stage=args.stage, source_split=args.source_split)
+        else:
+            tasks_path = Path(args.tasks)
+            if not tasks_path.is_absolute():
+                tasks_path = ROOT / tasks_path
+            tasks = []
+            with tasks_path.open("r", encoding="utf-8") as f:
+                for number, line in enumerate(f, 1):
+                    if line.strip():
+                        value = json.loads(line)
+                        if not isinstance(value, dict):
+                            parser.error(f"Invalid task at line {number}")
+                        tasks.append(value)
+        logging.info("Loaded %d tasks", len(tasks))
 
         if args.teacher_backend == "remote":
             default_url = "https://api.openai.com/v1"
@@ -1242,9 +996,12 @@ def main() -> int:
             api_key=teacher_key,
             model=teacher_model,
             timeout_seconds=teacher_timeout,
-            max_retries=3,
-            max_tool_rounds=8,
-            max_output_tokens=2048,
+            max_retries=args.teacher_retries,
+            max_tool_rounds=args.max_reasoning_steps,
+            temperature=args.teacher_temperature,
+            top_p=args.teacher_top_p,
+            sandbox_timeout_seconds=args.sandbox_timeout,
+            max_output_tokens=args.teacher_max_output_tokens,
         )
         runtime = ResponsesRuntime(cfg, builder.registry, probe_on_init=False)
         stream_jsonl = out_dir / "tasks_stream_trajectories.jsonl"
@@ -1274,18 +1031,11 @@ def main() -> int:
             logging.info(f"Loading canonical trajectories from directory: {in_path}")
             raw_trajectories.extend(builder.load_from_json_dir(in_path))
 
-    # Auto-discover from default trajectories if no tasks or input explicitly given and synthesize-count == 0
-    if not args.tasks and not args.input and args.synthesize_count == 0:
-        default_dir = ROOT / "outputs" / "hjl_trajectories"
-        if default_dir.is_dir():
-            logging.info(f"Auto-discovering existing trajectories from {default_dir}...")
-            raw_trajectories.extend(builder.load_from_json_dir(default_dir))
-            jsonl_file = default_dir / "hjl_trajectory.jsonl"
-            if jsonl_file.is_file():
-                raw_trajectories.extend(builder.load_from_jsonl(jsonl_file))
-
     # 3. Synthesize if requested or if no raw trajectories were available
     synth_target = args.synthesize_count
+    if (args.tasks or args.source or args.input) and not raw_trajectories:
+        logging.error("No supplied/generated trajectories accepted; refusing synthetic fallback")
+        return 1
     if not raw_trajectories and synth_target == 0:
         logging.info(f"No input trajectories found; synthesizing 10 Stage-{args.stage} verified multi-turn tool trajectories...")
         synth_target = 10

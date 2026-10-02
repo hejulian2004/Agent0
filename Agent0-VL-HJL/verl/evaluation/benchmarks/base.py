@@ -80,6 +80,10 @@ class BaseBenchmark:
     # ------------------------------------------------------------------
     def load_data(self, max_samples: Optional[int] = None) -> List[Dict[str, Any]]:
         rows = self._load_local()
+        from pathlib import Path
+        from tools.data_builder.split_policy import assert_benchmark_allowed
+        assert_benchmark_allowed(self.name, rows, self.hf_split,
+                                 Path(__file__).resolve().parents[3] / 'data/rl/local_manifest.json')
         source = "local"
         if rows is None:
             rows = self._load_hf()

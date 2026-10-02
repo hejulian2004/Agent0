@@ -88,6 +88,10 @@ class TaskRunner:
         pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
         OmegaConf.resolve(config)
 
+        if config.get('local_schedule'):
+            from tools.training.local_schedule import install
+            install(config)
+
         # download the checkpoint from hdfs
         local_path = copy_to_local(config.actor_rollout_ref.model.path)
 
@@ -165,7 +169,11 @@ class TaskRunner:
             mapping[Role.RefPolicy] = global_pool_id
 
         reward_manager_name = config.reward_model.get("reward_manager", "multiturn")
-        if reward_manager_name == 'multiturn':
+        if config.actor_rollout_ref.rollout.get('checkpointed', None):
+            # Outcomes are scored privately inside each isolated episode.
+            # Never instantiate the legacy confidence/process reward manager.
+            reward_manager_cls = val_reward_manager_cls = lambda **kwargs: None
+        elif reward_manager_name == 'multiturn':
             from verl.workers.reward_manager import MultiTurnRewardManager
             reward_manager_cls = MultiTurnRewardManager
             val_reward_manager_cls = MultiTurnRewardManager

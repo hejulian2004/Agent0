@@ -23,12 +23,9 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "config.yaml"
 
 
-def load_config() -> dict[str, Any]:
-    with CONFIG_PATH.open(encoding="utf-8") as handle:
-        config = yaml.safe_load(handle)
-    if not isinstance(config, dict):
-        raise ValueError(f"configuration root must be a mapping: {CONFIG_PATH}")
-    return config
+def load_config(profile=None) -> dict[str, Any]:
+    from tools.local_profile import load_config as load
+    return load(ROOT, profile)
 
 
 def flatten(prefix: str, value: Any):
@@ -90,7 +87,8 @@ def sandbox_environment(config: dict[str, Any]) -> dict[str, str]:
     env["SANDBOX_PRELOAD_PACKAGES"] = json.dumps(settings.get("preload_packages", []))
     # Keep Ultralytics-generated settings/cache inside this project's venv.
     yolo_config_dir = ROOT / ".venv/share/ultralytics-config"
-    yolo_config_dir.mkdir(parents=True, exist_ok=True)
+    if not DRY_RUN:
+        yolo_config_dir.mkdir(parents=True, exist_ok=True)
     env["YOLO_CONFIG_DIR"] = str(yolo_config_dir)
     tool_runtime = config.get("tool_runtime", {})
     detector = tool_runtime.get("detector", {})
@@ -238,14 +236,19 @@ def launch_serve_teacher(config: dict[str, Any], extra: list[str]) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("rl", "sft-stage1", "sft-stage2", "qlora-smoke", "evaluate", "probe", "build-data", "build-rl", "build-sft", "serve-teacher"))
+    parser.add_argument("action", choices=("rl", "sft-stage1", "sft-stage2", "qlora-smoke", "evaluate", "probe", "build-data", "build-rl", "build-sft", "serve-teacher", "preflight", "prepare-balanced", "reset-generation", "build-balanced-sft", "sft-local", "export-sft"))
     parser.add_argument("--dry-run", action="store_true", help="print the resolved command without starting it")
+    parser.add_argument("--profile", choices=("local_4090", "local_4090_checkpointed"))
     args, extra = parser.parse_known_args()
     if extra and extra[0] == "--":
         extra = extra[1:]
-    config = load_config()
+    config = load_config(args.profile)
     global DRY_RUN
     DRY_RUN = args.dry_run
+
+    if args.profile:
+        from tools.local_workflows import launch_local
+        return launch_local(config, args.action, extra, root=ROOT, dry_run=DRY_RUN)
 
     if args.action == "serve-teacher":
         return launch_serve_teacher(config, extra)

@@ -82,16 +82,28 @@ class ResponsesAdapter:
                 except Exception:
                     pass
 
-        if img_url:
-            text_dict = {k: v for k, v in output_dict.items() if k not in {"image_url", "image_data"}}
-            return {
-                "type": "function_call_output",
-                "call_id": item["call_id"],
-                "output": [
-                    {"type": "input_text", "text": json.dumps(text_dict, ensure_ascii=False)},
-                    {"type": "input_image", "image_url": img_url},
-                ],
-            }
+        image_urls = list(output_dict.get("image_urls", []))
+        if img_url and img_url not in image_urls:
+            image_urls.append(img_url)
+        for path in output_dict.get("images", []):
+            try:
+                import base64
+                from agent0_protocol.tools import _resolve_relative_path
+                from PIL import Image
+                image_path = _resolve_relative_path(path)
+                with Image.open(image_path) as opened:
+                    mime = Image.MIME.get(opened.format, "image/png")
+                    opened.verify()
+                url = "data:" + mime + ";base64," + base64.b64encode(image_path.read_bytes()).decode("ascii")
+                if url not in image_urls:
+                    image_urls.append(url)
+            except (OSError, ValueError, TypeError):
+                continue
+        if image_urls:
+            text_dict = {k: v for k, v in output_dict.items() if k not in {"image_url", "image_urls", "image_data"}}
+            return {"type": "function_call_output", "call_id": item["call_id"], "output": [
+                {"type": "input_text", "text": json.dumps(text_dict, ensure_ascii=False)},
+                *[{"type": "input_image", "image_url": url} for url in image_urls]]}
         return {
             "type": "function_call_output",
             "call_id": item["call_id"],
@@ -195,8 +207,14 @@ class QwenModelAdapter:
                 payload = json.dumps({"name": item["name"], "arguments": item["arguments"]}, ensure_ascii=False, separators=(",", ":"))
                 parts.append(f"<|im_start|>assistant\n{self.OPEN_CALL}{payload}{self.CLOSE_CALL}<|im_end|>\n")
             elif kind == "function_call_output":
-                payload = json.dumps({"call_id": item["call_id"], "output": item["output"]}, ensure_ascii=False, separators=(",", ":"))
-                parts.append(f"<|im_start|>tool\n{payload}<|im_end|>\n")
+                wire = ResponsesAdapter.function_result(item)["output"]
+                if isinstance(wire, list):
+                    clean = json.loads(next(p["text"] for p in wire if p["type"] == "input_text"))
+                    markers = "".join("<image>" for p in wire if p["type"] == "input_image")
+                else:
+                    clean, markers = json.loads(wire), ""
+                payload = json.dumps({"call_id": item["call_id"], "output": clean}, ensure_ascii=False, separators=(",", ":"))
+                parts.append(f"<|im_start|>tool\n{payload}{markers}<|im_end|>\n")
             else:
                 raise ProtocolError(f"unsupported item type: {kind!r}")
         if generate:

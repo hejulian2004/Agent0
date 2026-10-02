@@ -488,7 +488,7 @@ class RayPPOTrainer(object):
         self.train_dataloader = StatefulDataLoader(dataset=self.train_dataset,
                                                    batch_size=self.config.data.get('gen_batch_size',
                                                                                    self.config.data.train_batch_size),
-                                                   num_workers=8,
+                                                   num_workers=self.config.data.get("num_workers", 8),
                                                    drop_last=True,
                                                    collate_fn=collate_fn,
                                                    sampler=sampler)
@@ -903,6 +903,9 @@ class RayPPOTrainer(object):
         metrics.update(global_balance_stats)
 
     def fit(self):
+        if self.config.actor_rollout_ref.rollout.get('checkpointed', None):
+            from tools.training.checkpointed_trainer import fit
+            return fit(self)
         """
         The training loop of PPO.
         The driver process only need to call the compute functions of the worker group through RPC to construct the PPO dataflow.
@@ -960,6 +963,8 @@ class RayPPOTrainer(object):
 
                 with _timer('step', timing_raw):
                     # generate a batch
+                    if self.config.get('local_schedule'):
+                        print('[Agent0-VL trainer] rollout_start', flush=True)
                     with _timer('gen', timing_raw):
                         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
 
@@ -1072,8 +1077,12 @@ class RayPPOTrainer(object):
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
                         # update actor
+                        if self.config.get('local_schedule'):
+                            print('[Agent0-VL trainer] actor_update_start', flush=True)
                         with _timer('update_actor', timing_raw):
                             actor_output = self.actor_rollout_wg.update_actor(batch)
+                        if self.config.get('local_schedule'):
+                            print('[Agent0-VL trainer] actor_update_done', flush=True)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
                         metrics.update(actor_output_metrics)
 
@@ -1099,6 +1108,12 @@ class RayPPOTrainer(object):
                 metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
 
                 # TODO: make a canonical logger that supports various backend
+                if self.config.get('local_schedule'):
+                    from tools.training.rl_workbench import RLWorkbench
+                    if not hasattr(self, '_local_workbench'):
+                        self._local_workbench = RLWorkbench(self.config.trainer.default_local_dir)
+                    self._local_workbench.log(self.global_steps, batch, reward_extra_infos_dict,
+                                              self.train_dataloader.current_phase)
                 logger.log(data=metrics, step=self.global_steps)
 
                 if is_last_step:

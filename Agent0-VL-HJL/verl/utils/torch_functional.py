@@ -555,3 +555,27 @@ def get_unpad_data(attention_mask):
         cu_seqlens,
         max_seqlen_in_batch,
     )
+
+
+def entropy_from_logits_chunked(logits: torch.Tensor, chunk_size: int = 256):
+    """Same per-token entropy, with bounded intermediates and backward recompute.
+
+    The full logits and their gradients still exist. Checkpointing avoids retaining
+    each chunk's softmax/product tensors until backward; plain chunking does not.
+    """
+    from torch.utils.checkpoint import checkpoint
+
+    if chunk_size < 1:
+        raise ValueError('entropy chunk_size must be positive')
+    flat = logits.reshape(-1, logits.shape[-1])
+    if flat.shape[0] == 0:
+        return logits.sum(dim=-1)
+    values = []
+    for chunk in flat.split(chunk_size, dim=0):
+        if torch.is_grad_enabled() and chunk.requires_grad:
+            value = checkpoint(entropy_from_logits, chunk, use_reentrant=False,
+                               preserve_rng_state=False)
+        else:
+            value = entropy_from_logits(chunk)
+        values.append(value)
+    return torch.cat(values, dim=0).reshape(logits.shape[:-1])

@@ -93,22 +93,31 @@ class vLLMRollout(BaseRollout):
             vllm_ps.initialize_parallel_state(tensor_model_parallel_size=tensor_parallel_size,
                                               num_tp_per_train_tp=num_tp_per_train_tp)
 
-        assert model_hf_config.max_position_embeddings >= config.prompt_length + config.response_length, \
+        assert getattr(model_hf_config, 'text_config', model_hf_config).max_position_embeddings >= config.prompt_length + config.response_length, \
             "model context length should be greater than total sequence length"
 
         max_model_len = self.config.max_model_len if self.config.max_model_len \
                         else config.prompt_length + config.response_length
         max_model_len = int(max_model_len)
 
-        if max_num_batched_tokens < max_model_len and self.config.enable_chunked_prefill:
+        if max_num_batched_tokens < max_model_len and self.config.enable_chunked_prefill and not config.get('local_protocol', False):
             raise ValueError('Enable chunked prefill, max_num_batched_tokens is smaller than max_model_len, \
                              please increase max_num_batched_tokens or disable chunked prefill')
 
         trust_remote_code = kwargs.get('trust_remote_code', False)
         load_format = 'dummy' if config.load_format.startswith('dummy') else config.load_format
 
+        compatibility = {}
+        if config.get('local_protocol', False):
+            compatibility.update(hf_overrides={'mm_device_do_normalize': False},
+                                 max_num_seqs=int(config.max_num_seqs))
+        if config.get('checkpointed', None):
+            slots = config.checkpointed.adapters
+            compatibility.update(enable_lora=True, max_loras=int(slots.max_loras),
+                max_cpu_loras=int(slots.max_cpu_loras), max_lora_rank=int(slots.rank))
         self.inference_engine = LLM(
             model=model_path,
+            **compatibility,
             enable_sleep_mode=True,
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend="external_launcher",
@@ -128,7 +137,7 @@ class vLLMRollout(BaseRollout):
         )
 
         # Offload vllm model to reduce peak memory usage
-        self.inference_engine.sleep(level=1)
+        self.inference_engine.sleep(level=int(config.get('sleep_level', 1)))
 
         kwargs = dict(
             n=1,

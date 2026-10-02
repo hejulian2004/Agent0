@@ -85,7 +85,7 @@ class ProtocolTests(unittest.TestCase):
             with self.assertRaisesRegex(CapabilityError, "TimeoutError"):
                 ResponsesRuntime(config, self.registry)
             self.assertEqual(constructor.call_args.kwargs["timeout"], 12)
-            self.assertEqual(constructor.call_args.kwargs["max_retries"], 2)
+            self.assertEqual(constructor.call_args.kwargs["max_retries"], 0)
 
     def test_multistep_call_ids_and_tool_snapshot(self):
         fake = FakeResponses()

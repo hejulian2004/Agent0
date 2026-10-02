@@ -93,6 +93,7 @@ class vLLMAgent0Rollout(vLLMRollout):
     """
 
     def __init__(self, model_path: str, config: DictConfig, tokenizer, model_hf_config, **kwargs):
+        self.processor = kwargs.pop("processor", None)
         self.model_path = model_path
         # Agent0-VL specific configuration (read before super().__init__ so we
         # can extend max_model_len for the multi-turn budget).
@@ -126,14 +127,14 @@ class vLLMAgent0Rollout(vLLMRollout):
             desired = config.prompt_length + extended_response_length
         else:
             desired = max(int(original_max_model_len), config.prompt_length + config.response_length)
-        config.max_model_len = min(desired, model_hf_config.max_position_embeddings)
+        config.max_model_len = min(desired, getattr(model_hf_config, 'text_config', model_hf_config).max_position_embeddings)
 
         # vLLM (and verl's base rollout) require max_num_batched_tokens >=
         # max_model_len when chunked prefill is enabled. The multi-turn budget
         # can push max_model_len above the configured token budget for large
         # ``max_total_response_length`` settings, so raise the budget to match
         # (a no-op for the default config where it is already large enough).
-        if config.get('enable_chunked_prefill', True):
+        if config.get('enable_chunked_prefill', True) and not config.get('local_protocol', False):
             mnbt = int(config.get('max_num_batched_tokens', 8192))
             if mnbt < int(config.max_model_len):
                 config.max_num_batched_tokens = int(config.max_model_len)
@@ -240,6 +241,9 @@ Solver role: re-derive corrected reasoning step applying this patch, then contin
         multiturn_mask (model-generated tokens only) and per-step metadata in
         ``non_tensor_batch['step_data']``.
         """
+        if self.config.get('local_protocol', False):
+            from tools.training.canonical_rollout import generate_sequences
+            return generate_sequences(self, prompts, **kwargs)
         idx = prompts.batch['input_ids']
         attention_mask = prompts.batch['attention_mask']
         position_ids = prompts.batch['position_ids']

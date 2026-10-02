@@ -5,14 +5,17 @@ from __future__ import annotations
 import base64
 import copy
 import io
+import json
+import math
 import os
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlparse
 
-from openai import OpenAI
+from openai import OpenAI, APITimeoutError, APIConnectionError, APIStatusError
 
 from .adapters import ResponsesAdapter
 from .schema import CanonicalTrajectory, ProtocolError
@@ -37,7 +40,11 @@ class ResponsesConfig:
     timeout_seconds: float = 180.0
     max_retries: int = 3
     max_tool_rounds: int = 8
-    max_output_tokens: int = 2048
+    max_output_tokens: int = 0
+    temperature: float = 0.0
+    top_p: float = 1.0
+    sandbox_timeout_seconds: float = 10.0
+    checkpointed_settings: dict | None = None
 
     @classmethod
     def from_env(cls) -> "ResponsesConfig":
@@ -48,7 +55,12 @@ class ResponsesConfig:
             timeout_seconds=float(os.environ.get("AGENT0_RESPONSES_TIMEOUT_SECONDS", "180")),
             max_retries=int(os.environ.get("AGENT0_RESPONSES_MAX_RETRIES", "3")),
             max_tool_rounds=int(os.environ.get("AGENT0_RESPONSES_MAX_TOOL_ROUNDS", "8")),
-            max_output_tokens=int(os.environ.get("AGENT0_RESPONSES_MAX_OUTPUT_TOKENS", "2048")),
+            max_output_tokens=int(os.environ.get("AGENT0_RESPONSES_MAX_OUTPUT_TOKENS", "0")),
+            temperature=float(os.environ.get("AGENT0_RESPONSES_TEMPERATURE", "0")),
+            top_p=float(os.environ.get("AGENT0_RESPONSES_TOP_P", "1")),
+            sandbox_timeout_seconds=float(os.environ.get("SANDBOX_RUN_TIMEOUT", "10")),
+            checkpointed_settings=json.loads(os.environ['AGENT0_CHECKPOINTED_SETTINGS'])
+                if os.environ.get('AGENT0_CHECKPOINTED_SETTINGS') else None,
         )
 
     def validate(self) -> None:
@@ -57,8 +69,10 @@ class ResponsesConfig:
             raise ValueError("AGENT0_RESPONSES_BASE_URL must be an HTTP(S) /v1 API root")
         if not self.api_key or not self.model:
             raise ValueError("AGENT0_RESPONSES_API_KEY and AGENT0_RESPONSES_MODEL are required")
-        if self.timeout_seconds <= 0 or self.max_retries < 0 or self.max_tool_rounds <= 0 or self.max_output_tokens <= 0:
+        if self.timeout_seconds <= 0 or self.max_retries < 0 or self.max_tool_rounds <= 0 or self.max_output_tokens < 0:
             raise ValueError("invalid Responses timeout, retry, or tool-round limit")
+        if not math.isfinite(self.temperature) or not 0 <= self.temperature <= 2 or not 0 < self.top_p <= 1 or not self.sandbox_timeout_seconds > 0:
+            raise ValueError("invalid decoding or sandbox settings")
 
 
 class ResponsesRuntime:
@@ -74,19 +88,50 @@ class ResponsesRuntime:
     ) -> None:
         config.validate()
         self.config = config
+        self._injected_client = client is not None
         self.registry = registry or get_tool_registry()
         self.client = client or OpenAI(
             api_key=config.api_key,
             base_url=config.base_url,
             timeout=config.timeout_seconds,
-            max_retries=config.max_retries,
+            max_retries=0,
         )
         self.adapter = ResponsesAdapter()
         if probe_on_init:
             self.probe_capabilities()
 
     def _create(self, **kwargs: Any) -> Any:
-        return self.client.responses.create(model=self.config.model, **kwargs)
+        # One budget covers all transient retries. Never retry a timeout.
+        budget = self.config.timeout_seconds if self.config.checkpointed_settings else min(self.config.timeout_seconds, 300.0)
+        budget = kwargs.pop('request_budget_seconds', budget)
+        if not isinstance(budget, (int, float)) or not math.isfinite(budget) or budget <= 0:
+            raise ValueError('request budget must be positive and finite')
+        deadline = time.monotonic() + budget
+        kwargs = dict(kwargs)
+        kwargs.setdefault("temperature", self.config.temperature)
+        kwargs.setdefault("top_p", self.config.top_p)
+        if kwargs.get("max_output_tokens", 0) < 0:
+            raise ValueError("max_output_tokens must be nonnegative")
+        if not kwargs.get("max_output_tokens"):
+            kwargs.pop("max_output_tokens", None)
+        retries = kwargs.pop("request_retries", self.config.max_retries)
+        for attempt in range(retries + 1):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Responses request exceeded its time budget")
+            try:
+                return self.client.responses.create(model=self.config.model, timeout=remaining, **kwargs)
+            except (APITimeoutError, TimeoutError):
+                raise
+            except (APIConnectionError, APIStatusError) as exc:
+                if isinstance(exc, APIStatusError) and exc.status_code not in {409, 429, 500, 502, 503}:
+                    raise
+                if attempt == retries:
+                    raise
+                delay = min(2 ** attempt, 8)
+                if time.monotonic() + delay >= deadline:
+                    raise TimeoutError("Responses retry would exceed time budget") from exc
+                time.sleep(delay)
 
     def probe_capabilities(self) -> None:
         """Require text, image, function calls and two sequential tool rounds."""
@@ -215,7 +260,7 @@ class ResponsesRuntime:
 
     def run_verifier(self, trajectory: CanonicalTrajectory) -> dict[str, Any]:
         """Run remote verifier role over a canonical trajectory via Responses API."""
-        from verl.prompts.agent0_templates import render_verifier_request
+        from agent0_protocol.local_prompts import render_verifier_request
         from .verifier import parse_verification_output
 
         prompt = render_verifier_request(trajectory)
@@ -244,7 +289,7 @@ class ResponsesRuntime:
         tool_context: Mapping[str, Any] | None = None,
     ) -> CanonicalTrajectory:
         """Run remote repair role via Responses API applying local patch/continuation."""
-        from verl.prompts.agent0_templates import render_repair_request
+        from agent0_protocol.local_prompts import render_repair_request
 
         prompt = render_repair_request(trajectory, feedback)
         resolved_context = dict(tool_context or {})

@@ -162,6 +162,11 @@ class ToolExecutionContext(dict[str, Any]):
         """Convenience alias to rollback to the last saved checkpoint."""
         self.rollback(None)
 
+    def synchronize(self, checkpoint: dict[str, Any]) -> None:
+        """Replicate the TP leader's current state, including its image audit."""
+        self.rollback(checkpoint)
+        self._image_files.paths = set(checkpoint.get('owned_paths', ()))
+
     def fork(self) -> "ToolExecutionContext":
         forked = ToolExecutionContext(self, _owner=self._image_files)
         forked._image_changed = self._image_changed
@@ -345,7 +350,12 @@ class ToolRegistry:
                 raise TypeError("handler must return an object")
             return result
         except Exception as exc:
-            return {"success": False, "error": f"{type(exc).__name__}: {exc}"}
+            output = {"success": False, "error": f"{type(exc).__name__}: {exc}"}
+            if context and context.get('checkpointed_protocol') and (
+                isinstance(exc, (ImportError, ConnectionError)) or
+                isinstance(exc, FileNotFoundError) and str(exc).startswith('detector model weights not found:')):
+                output['failure_kind'] = 'infrastructure'
+            return output
 
 
 def _current_image_path(context: Mapping[str, Any]) -> Path:
@@ -372,7 +382,8 @@ def _get_image_source(arguments: Mapping[str, Any], context: Mapping[str, Any]) 
 
 
 def _save_as_current(image: Any, context: Mapping[str, Any]) -> str:
-    target_dir = _get_intermediate_image_dir()
+    target_dir = Path(context["sft_output_root"]) if context.get("sft_output_root") else _get_intermediate_image_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
     filename = f"img_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}.png"
     abs_path = target_dir / filename
     try:
@@ -393,15 +404,45 @@ def _python_exec(arguments: dict[str, Any], context: Mapping[str, Any]) -> dict[
     from sandbox import get_parallel_sandbox
 
     runner = get_parallel_sandbox()
-    timeout = int(context.get("sandbox_timeout", os.getenv("SANDBOX_RUN_TIMEOUT", "10")))
+    timeout = float(context.get("sandbox_timeout", os.getenv("SANDBOX_RUN_TIMEOUT", "10")))
+    code = arguments["code"]
+    output_dir = None
+    if context.get("sft_output_root"):
+        output_dir = Path(context["sft_output_root"]) / ("snippet_" + uuid.uuid4().hex)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        image_path = context.get("current_image_path")
+        if image_path:
+            image_path = str(_resolve_relative_path(image_path))
+        code = "import os\nimage_path = " + repr(image_path) + "\noutput_dir = " + repr(str(output_dir)) + "\n" + code
     success, stdout, stderr = asyncio.run(
-        runner([arguments["code"]], num_processes=1, run_timeout=timeout)
+        runner([code], num_processes=1, run_timeout=timeout)
     )
-    return {
-        "success": bool(success[0]),
-        "stdout": str(stdout[0])[:512],
-        "stderr": str(stderr[0])[:512],
-    }
+    result = {"success": bool(success[0]), "stdout": str(stdout[0])[:512], "stderr": str(stderr[0])[:512]}
+    if output_dir is not None:
+        from PIL import Image
+        root = Path(context["sft_output_root"]).resolve()
+        candidates = set(output_dir.rglob("*"))
+        for line in str(stdout[0]).splitlines():
+            path = Path(line.strip())
+            if not path.is_absolute():
+                path = output_dir / path
+            if path.resolve().is_relative_to(root):
+                candidates.add(path)
+        images = []
+        for path in sorted(candidates):
+            if not path.resolve().is_relative_to(root) or not path.is_file():
+                continue
+            try:
+                with Image.open(path) as image:
+                    image.verify()
+                images.append(_to_relative_path(path.resolve()))
+            except (OSError, ValueError):
+                continue
+        if images:
+            result["images"] = images
+            if isinstance(context, ToolExecutionContext):
+                context.set_generated_image(_resolve_relative_path(images[-1]))
+    return result
 
 
 def _crop_image(arguments: dict[str, Any], context: Mapping[str, Any]) -> dict[str, Any]:

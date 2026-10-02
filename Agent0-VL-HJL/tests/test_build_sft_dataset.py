@@ -46,9 +46,9 @@ class DummyTokenizer:
 def test_answer_judge_extraction():
     assert AnswerJudge.extract_answer("<answer>42</answer>") == "42"
     assert AnswerJudge.extract_answer("Work...\n\\boxed{12.5}\nDone") == "12.5"
-    assert AnswerJudge.extract_answer("The answer is: 100") == "100"
-    assert AnswerJudge.extract_answer("Therefore, final answer: B.") == "B"
-    assert AnswerJudge.extract_answer("Raw conclusion 99") == "Raw conclusion 99"
+    assert AnswerJudge.extract_answer("The answer is: 100") is None
+    assert AnswerJudge.extract_answer("FINAL_ANSWER: B") == "B"
+    assert AnswerJudge.extract_answer("Raw conclusion 99") is None
 
 
 def test_answer_judge_numerical_and_option_equivalence():
@@ -223,6 +223,10 @@ def test_concurrent_task_rollout_runner(tmp_path):
         def create(self, **kwargs):
             self.count += 1
             inp = kwargs.get("input", [])
+            if inp[-1].get("role") == "user" and inp[-1].get("content", "").startswith("Verify semantic trajectory"):
+                return SimpleNamespace(id="verify", output=[{
+                    "type": "message", "role": "assistant", "content": [{"type": "output_text", "text":
+                    json.dumps({"score": 1, "confidence": 0.9, "critique": "ok", "tool_check": True})}]}])
             # If function output already received, return final message
             if any(isinstance(x, dict) and x.get("type") == "function_call_output" for x in inp):
                 return SimpleNamespace(id="resp_2", output=[{
